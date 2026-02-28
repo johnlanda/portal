@@ -1,0 +1,444 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/tetratelabs/portal/internal/envoy"
+	"github.com/tetratelabs/portal/internal/kube"
+	"github.com/tetratelabs/portal/internal/state"
+)
+
+type statusOpts struct {
+	outputJSON bool
+}
+
+// NewStatusCmd creates the `portal status` command.
+func NewStatusCmd() *cobra.Command {
+	var opts statusOpts
+
+	cmd := &cobra.Command{
+		Use:   "status [<source_context> <destination_context>]",
+		Short: "Show tunnel status and connection details",
+		Long: `Show the live status of one or all Portal tunnels.
+
+With no arguments, shows a summary of all tunnels.
+With two arguments, shows detailed status for a specific tunnel including
+pod health, restart counts, and service endpoints.`,
+		Args: cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return fmt.Errorf("expected 0 or 2 arguments, got 1")
+			}
+			if len(args) == 2 {
+				return runStatusSingle(cmd, args[0], args[1], opts)
+			}
+			return runStatusAll(cmd, opts)
+		},
+	}
+
+	cmd.Flags().BoolVar(&opts.outputJSON, "json", false, "Output in JSON format")
+
+	return cmd
+}
+
+// tunnelStatus holds the computed status for a single tunnel.
+type tunnelStatus struct {
+	Name               string       `json:"name"`
+	SourceContext      string       `json:"source_context"`
+	DestinationContext string       `json:"destination_context"`
+	Namespace          string       `json:"namespace"`
+	TunnelPort         int          `json:"tunnel_port"`
+	Status             string       `json:"status"`
+	Initiator          *podStatus   `json:"initiator,omitempty"`
+	Responder          *podStatus   `json:"responder,omitempty"`
+	ResponderEndpoint  string       `json:"responder_endpoint,omitempty"`
+	Error              string       `json:"error,omitempty"`
+}
+
+type podStatus struct {
+	Ready    bool        `json:"ready"`
+	Phase    string      `json:"phase"`
+	Restarts int32       `json:"restarts"`
+	PodName  string      `json:"pod_name"`
+	Stats    *envoyStats `json:"stats,omitempty"`
+}
+
+// envoyStats holds key metrics from the Envoy admin /stats endpoint.
+type envoyStats struct {
+	UptimeSeconds     int64 `json:"uptime_seconds"`
+	ActiveConnections int64 `json:"active_connections"`
+	TotalConnections  int64 `json:"total_connections"`
+	BytesSent         int64 `json:"bytes_sent"`
+	BytesReceived     int64 `json:"bytes_received"`
+}
+
+func runStatusAll(cmd *cobra.Command, opts statusOpts) error {
+	store, err := newStateStore()
+	if err != nil {
+		return fmt.Errorf("failed to initialize state store: %w", err)
+	}
+
+	tunnels, err := store.List()
+	if err != nil {
+		return fmt.Errorf("failed to load tunnel state: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+
+	if len(tunnels) == 0 {
+		fmt.Fprintln(out, "No tunnels found.")
+		return nil
+	}
+
+	// Query live status for each tunnel. Errors are captured per-tunnel, not fatal.
+	statuses := make([]tunnelStatus, 0, len(tunnels))
+	for _, t := range tunnels {
+		ts := queryTunnelStatus(t)
+		statuses = append(statuses, ts)
+	}
+
+	if opts.outputJSON {
+		return printJSON(out, statuses)
+	}
+
+	for i, s := range statuses {
+		if i > 0 {
+			fmt.Fprintln(out)
+		}
+		printStatusSummary(cmd, s)
+	}
+	return nil
+}
+
+func runStatusSingle(cmd *cobra.Command, sourceCtx, destCtx string, opts statusOpts) error {
+	tunnelName := sourceCtx + "--" + destCtx
+
+	store, err := newStateStore()
+	if err != nil {
+		return fmt.Errorf("failed to initialize state store: %w", err)
+	}
+
+	ts, err := store.Get(tunnelName)
+	if err != nil {
+		return fmt.Errorf("failed to read tunnel state: %w", err)
+	}
+	if ts == nil {
+		return fmt.Errorf("tunnel %q not found in state", tunnelName)
+	}
+
+	status := queryTunnelStatus(*ts)
+
+	// Enrich with Envoy admin stats (only for single-tunnel detail view).
+	enrichWithEnvoyStats(&status, *ts)
+
+	out := cmd.OutOrStdout()
+	if opts.outputJSON {
+		return printJSON(out, status)
+	}
+
+	printStatusDetail(cmd, status)
+	return nil
+}
+
+// queryTunnelStatus probes both clusters for live pod and service info.
+func queryTunnelStatus(ts state.TunnelState) tunnelStatus {
+	s := tunnelStatus{
+		Name:               ts.Name,
+		SourceContext:      ts.SourceContext,
+		DestinationContext: ts.DestinationContext,
+		Namespace:          ts.Namespace,
+		TunnelPort:         ts.TunnelPort,
+		Status:             "Unknown",
+	}
+
+	ctx := context.Background()
+
+	// Query initiator pods from source cluster.
+	sourceClient := newKubeClient(ts.SourceContext, ts.Namespace)
+	initiatorPods, err := sourceClient.GetPods(ctx, "app.kubernetes.io/name=portal-initiator")
+	if err != nil {
+		s.Error = fmt.Sprintf("failed to query initiator pods: %v", err)
+		return s
+	}
+	if len(initiatorPods) > 0 {
+		p := initiatorPods[0]
+		s.Initiator = &podStatus{
+			Ready:    p.Ready,
+			Phase:    string(p.Phase),
+			Restarts: p.Restarts,
+			PodName:  p.Name,
+		}
+	}
+
+	// Query responder pods from destination cluster.
+	destClient := newKubeClient(ts.DestinationContext, ts.Namespace)
+	responderPods, err := destClient.GetPods(ctx, "app.kubernetes.io/name=portal-responder")
+	if err != nil {
+		s.Error = fmt.Sprintf("failed to query responder pods: %v", err)
+		return s
+	}
+	if len(responderPods) > 0 {
+		p := responderPods[0]
+		s.Responder = &podStatus{
+			Ready:    p.Ready,
+			Phase:    string(p.Phase),
+			Restarts: p.Restarts,
+			PodName:  p.Name,
+		}
+	}
+
+	// Query responder service for external endpoint.
+	svcInfo, err := destClient.GetService(ctx, "portal-responder")
+	if err == nil && svcInfo != nil {
+		if len(svcInfo.LoadBalancerIngress) > 0 {
+			addr := svcInfo.LoadBalancerIngress[0].Address()
+			if addr != "" {
+				s.ResponderEndpoint = fmt.Sprintf("%s:%d", addr, ts.TunnelPort)
+			}
+		}
+	}
+
+	// Determine overall status.
+	s.Status = deriveStatus(s)
+	return s
+}
+
+func deriveStatus(s tunnelStatus) string {
+	if s.Error != "" {
+		return "Error"
+	}
+	if s.Initiator == nil || s.Responder == nil {
+		return "Pending"
+	}
+	if s.Initiator.Ready && s.Responder.Ready {
+		return "Connected"
+	}
+	if s.Initiator.Phase == string(kube.PodFailed) || s.Responder.Phase == string(kube.PodFailed) {
+		return "Failed"
+	}
+	return "Degraded"
+}
+
+// fetchEnvoyStatsFn is a testability hook for fetching Envoy admin stats.
+var fetchEnvoyStatsFn = fetchEnvoyStats
+
+// enrichWithEnvoyStats fetches Envoy admin stats for both pods and attaches them.
+func enrichWithEnvoyStats(s *tunnelStatus, ts state.TunnelState) {
+	ctx := context.Background()
+
+	if s.Initiator != nil && s.Initiator.Ready {
+		sourceClient := newKubeClient(ts.SourceContext, ts.Namespace)
+		stats := fetchEnvoyStatsFn(ctx, sourceClient, s.Initiator.PodName, envoy.DefaultInitiatorAdminPort)
+		if stats != nil {
+			s.Initiator.Stats = stats
+		}
+	}
+
+	if s.Responder != nil && s.Responder.Ready {
+		destClient := newKubeClient(ts.DestinationContext, ts.Namespace)
+		stats := fetchEnvoyStatsFn(ctx, destClient, s.Responder.PodName, envoy.DefaultResponderAdminPort)
+		if stats != nil {
+			s.Responder.Stats = stats
+		}
+	}
+}
+
+// fetchEnvoyStats port-forwards to the Envoy admin port and queries /stats.
+func fetchEnvoyStats(ctx context.Context, client kube.Client, podName string, adminPort int) *envoyStats {
+	localPort, err := findFreePort()
+	if err != nil {
+		return nil
+	}
+
+	session, err := client.PortForward(ctx, "pod/"+podName, localPort, adminPort)
+	if err != nil || session == nil {
+		return nil
+	}
+	defer session.Close()
+
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/stats?usedonly&format=json", localPort))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	return parseEnvoyStats(body)
+}
+
+// envoyStatsResponse mirrors the JSON structure from Envoy /stats?format=json.
+type envoyStatsResponse struct {
+	Stats []envoyStatEntry `json:"stats"`
+}
+
+type envoyStatEntry struct {
+	Name  string `json:"name"`
+	Value int64  `json:"value"`
+}
+
+// parseEnvoyStats extracts key metrics from the Envoy stats JSON response.
+func parseEnvoyStats(data []byte) *envoyStats {
+	var resp envoyStatsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil
+	}
+
+	stats := &envoyStats{}
+	for _, s := range resp.Stats {
+		switch {
+		case s.Name == "server.uptime":
+			stats.UptimeSeconds = s.Value
+		case strings.HasSuffix(s.Name, ".upstream_cx_active"):
+			stats.ActiveConnections += s.Value
+		case strings.HasSuffix(s.Name, ".upstream_cx_total"):
+			stats.TotalConnections += s.Value
+		case strings.HasSuffix(s.Name, ".upstream_cx_tx_bytes_total"):
+			stats.BytesSent += s.Value
+		case strings.HasSuffix(s.Name, ".upstream_cx_rx_bytes_total"):
+			stats.BytesReceived += s.Value
+		}
+	}
+	return stats
+}
+
+// findFreePort returns a free TCP port on localhost.
+func findFreePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port, nil
+}
+
+func printStatusSummary(cmd *cobra.Command, s tunnelStatus) {
+	out := cmd.OutOrStdout()
+	var icon string
+	switch s.Status {
+	case "Connected":
+		icon = "\u2713"
+	case "Error", "Failed":
+		icon = "\u2717"
+	default:
+		icon = "\u25cb"
+	}
+	fmt.Fprintf(out, "%s %s  %s \u2192 %s  [%s]\n", icon, s.Name, s.SourceContext, s.DestinationContext, s.Status)
+}
+
+func printStatusDetail(cmd *cobra.Command, s tunnelStatus) {
+	out := cmd.OutOrStdout()
+
+	fmt.Fprintf(out, "Tunnel:       %s\n", s.Name)
+	fmt.Fprintf(out, "Source:       %s\n", s.SourceContext)
+	fmt.Fprintf(out, "Destination:  %s\n", s.DestinationContext)
+	fmt.Fprintf(out, "Namespace:    %s\n", s.Namespace)
+	fmt.Fprintf(out, "Tunnel port:  %d\n", s.TunnelPort)
+	fmt.Fprintf(out, "Status:       %s\n", s.Status)
+
+	if s.ResponderEndpoint != "" {
+		fmt.Fprintf(out, "Endpoint:     %s\n", s.ResponderEndpoint)
+	}
+
+	fmt.Fprintln(out)
+
+	if s.Initiator != nil {
+		fmt.Fprintln(out, "Initiator:")
+		fmt.Fprintf(out, "  Pod:        %s\n", s.Initiator.PodName)
+		fmt.Fprintf(out, "  Phase:      %s\n", s.Initiator.Phase)
+		fmt.Fprintf(out, "  Ready:      %s\n", boolStr(s.Initiator.Ready))
+		fmt.Fprintf(out, "  Restarts:   %d\n", s.Initiator.Restarts)
+		printEnvoyStats(out, s.Initiator.Stats)
+	} else {
+		fmt.Fprintln(out, "Initiator:    No pods found")
+	}
+
+	fmt.Fprintln(out)
+
+	if s.Responder != nil {
+		fmt.Fprintln(out, "Responder:")
+		fmt.Fprintf(out, "  Pod:        %s\n", s.Responder.PodName)
+		fmt.Fprintf(out, "  Phase:      %s\n", s.Responder.Phase)
+		fmt.Fprintf(out, "  Ready:      %s\n", boolStr(s.Responder.Ready))
+		fmt.Fprintf(out, "  Restarts:   %d\n", s.Responder.Restarts)
+		printEnvoyStats(out, s.Responder.Stats)
+	} else {
+		fmt.Fprintln(out, "Responder:    No pods found")
+	}
+
+	if s.Error != "" {
+		fmt.Fprintln(out)
+		fmt.Fprintf(out, "Error:        %s\n", s.Error)
+	}
+}
+
+func printEnvoyStats(out io.Writer, stats *envoyStats) {
+	if stats == nil {
+		return
+	}
+	fmt.Fprintf(out, "  Uptime:     %s\n", formatDuration(time.Duration(stats.UptimeSeconds)*time.Second))
+	fmt.Fprintf(out, "  Connections: %d active, %d total\n", stats.ActiveConnections, stats.TotalConnections)
+	fmt.Fprintf(out, "  Traffic:    %s sent, %s received\n", formatBytes(stats.BytesSent), formatBytes(stats.BytesReceived))
+}
+
+// formatDuration formats a duration as a human-readable string.
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if hours < 24 {
+		return fmt.Sprintf("%dh%dm", hours, mins)
+	}
+	days := hours / 24
+	hours = hours % 24
+	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
+// formatBytes formats a byte count as a human-readable string.
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "Yes"
+	}
+	return "No"
+}
+
+// statusSummaryLine returns a one-line status used by other commands.
+func statusSummaryLine(s tunnelStatus) string {
+	parts := []string{s.Name, s.Status}
+	if s.ResponderEndpoint != "" {
+		parts = append(parts, s.ResponderEndpoint)
+	}
+	return strings.Join(parts, "  ")
+}

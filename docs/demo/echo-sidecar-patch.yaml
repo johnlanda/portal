@@ -1,0 +1,41 @@
+# Kustomize strategic merge patch — adds an HTTP echo server as a sidecar
+# in the portal-responder pod, listening on port 10001 (the local_backend
+# address that the responder Envoy forwards traffic to).
+#
+# This lets you send HTTP requests through the tunnel from the source cluster
+# and receive responses from the destination cluster, proving end-to-end
+# data flow over mTLS.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal-responder
+  namespace: portal-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: echo-server
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-listen=:10001"
+            - "-text=Hello from the destination cluster through the Portal tunnel!"
+          ports:
+            - containerPort: 10001
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
