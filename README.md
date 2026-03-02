@@ -495,41 +495,206 @@ directory, which is git-ignored by default).
 
 ## Go Library API
 
-Portal can be used as a Go library (`import "github.com/tetratelabs/portal"`)
-for programmatic tunnel management. This is how Synapse integrates Portal into
-its Helm-based deployment workflow.
+Portal can be used as a Go library for programmatic tunnel management. This is
+useful when you need to embed tunnel provisioning into a larger system (e.g., a
+Helm chart renderer, a Kubernetes operator, or a CI/CD pipeline).
+
+```
+go get github.com/tetratelabs/portal
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `RenderTunnel(cfg)` | Render manifests for a single-service tunnel |
+| `RenderTunnelWithServices(cfg, services)` | Render manifests for a multi-service (SNI-routed) tunnel |
+| `AddService(cfg, existing, newSvc)` | Re-render manifests with an additional service added to the list |
+| `GenerateCertificates(name, SANs, validity)` | Generate mTLS PKI (CA + leaf certs) without rendering manifests |
+
+All render functions return a `*ManifestBundle` containing YAML-encoded
+Kubernetes resources ready to be written to disk or applied to clusters.
+
+### Types
+
+#### TunnelConfig
 
 ```go
-import "github.com/tetratelabs/portal"
+type TunnelConfig struct {
+    // Required: kube context names identify the tunnel endpoints.
+    SourceContext      string
+    DestinationContext string
 
-// Single-service tunnel
-bundle, err := portal.RenderTunnel(portal.TunnelConfig{
-    SourceContext:      "dp-cluster",
-    DestinationContext: "mgmt-cluster",
-    ResponderEndpoint:  "tunnel.example.com:10443",
-})
+    // Required: the address initiators dial to reach the responder.
+    // Format: "host:port" or "ip:port".
+    ResponderEndpoint  string
 
-// Multi-service tunnel
+    // Optional (all have sensible defaults):
+    TunnelName      string        // default: "<source>--<destination>"
+    Namespace       string        // default: "portal-system"
+    TunnelPort      int           // default: 10443
+    ConnectionCount int           // default: 4
+    CertValidity    time.Duration // default: 8760h (1 year)
+    EnvoyImage      string        // default: envoyproxy/envoy:v1.37-latest (pinned by digest)
+    EnvoyLogLevel   string        // default: "info"
+    ServiceType     string        // default: "LoadBalancer" (also: "NodePort", "ClusterIP")
+    CertManager     bool          // use cert-manager CRDs instead of raw Secrets
+
+    // Multi-service routing (set by RenderTunnelWithServices / AddService):
+    Services []ServiceConfig
+
+    // External certificates — provide your own PEM-encoded certs instead
+    // of having Portal auto-generate them:
+    ExternalCerts *ExternalCertificates
+}
+```
+
+#### ServiceConfig
+
+```go
+type ServiceConfig struct {
+    SNI         string // SNI value for routing (also used as the service name)
+    BackendHost string // Backend FQDN in the destination cluster
+    BackendPort int    // Backend port
+    LocalPort   int    // Initiator listener port (0 = use BackendPort)
+}
+```
+
+#### ExternalCertificates
+
+```go
+type ExternalCertificates struct {
+    CACert        []byte // PEM-encoded CA certificate
+    InitiatorCert []byte // PEM-encoded initiator (client) certificate
+    InitiatorKey  []byte // PEM-encoded initiator private key
+    ResponderCert []byte // PEM-encoded responder (server) certificate
+    ResponderKey  []byte // PEM-encoded responder private key
+}
+```
+
+#### ManifestBundle
+
+```go
+type ManifestBundle struct {
+    Source      []Resource             // K8s resources for the source (initiator) cluster
+    Destination []Resource            // K8s resources for the destination (responder) cluster
+    Certs       *TunnelCertificates   // Generated certs (nil when using external certs or cert-manager)
+    Metadata    TunnelMetadata        // Tunnel metadata (name, contexts, services, timestamps)
+}
+```
+
+Each `Resource` has a `Filename` (e.g., `portal-initiator-deployment.yaml`) and
+`Content` (raw YAML bytes). This makes it straightforward to write to disk,
+embed in a Helm chart, or pipe to `kubectl apply`.
+
+#### TunnelCertificates
+
+Returned by `GenerateCertificates` and available on `ManifestBundle.Certs`
+when Portal auto-generates the PKI:
+
+```go
+type TunnelCertificates struct {
+    CACert        []byte // PEM-encoded CA certificate
+    CAKey         []byte // PEM-encoded CA private key
+    InitiatorCert []byte // PEM-encoded initiator client certificate
+    InitiatorKey  []byte // PEM-encoded initiator private key
+    ResponderCert []byte // PEM-encoded responder server certificate
+    ResponderKey  []byte // PEM-encoded responder private key
+}
+```
+
+### Examples
+
+#### Render a single-service tunnel and write to disk
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    "path/filepath"
+
+    "github.com/tetratelabs/portal"
+)
+
+func main() {
+    bundle, err := portal.RenderTunnel(portal.TunnelConfig{
+        SourceContext:      "dp-cluster",
+        DestinationContext: "mgmt-cluster",
+        ResponderEndpoint:  "tunnel.example.com:10443",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Write source (initiator) manifests.
+    for _, r := range bundle.Source {
+        if err := os.WriteFile(filepath.Join("out/source", r.Filename), r.Content, 0o644); err != nil {
+            log.Fatal(err)
+        }
+    }
+
+    // Write destination (responder) manifests.
+    for _, r := range bundle.Destination {
+        if err := os.WriteFile(filepath.Join("out/destination", r.Filename), r.Content, 0o644); err != nil {
+            log.Fatal(err)
+        }
+    }
+
+    // Persist the CA material for future certificate rotation.
+    if bundle.Certs != nil {
+        os.WriteFile("out/ca/ca.crt", bundle.Certs.CACert, 0o644)
+        os.WriteFile("out/ca/ca.key", bundle.Certs.CAKey, 0o600)
+    }
+}
+```
+
+#### Multi-service tunnel with SNI routing
+
+```go
 bundle, err := portal.RenderTunnelWithServices(portal.TunnelConfig{
     SourceContext:      "dp-cluster",
     DestinationContext: "mgmt-cluster",
     ResponderEndpoint:  "tunnel.example.com:10443",
+    Namespace:          "tunnels",          // override default namespace
+    CertValidity:       30 * 24 * time.Hour, // 30-day certs
 }, []portal.ServiceConfig{
     {SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
     {SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317},
+    {SNI: "metrics", BackendHost: "prometheus.monitoring.svc", BackendPort: 9090, LocalPort: 19090},
 })
+```
 
-// Add a service to an existing tunnel
-bundle, err := portal.AddService(cfg, existingServices, portal.ServiceConfig{
-    SNI: "metrics", BackendHost: "metrics.ns.svc", BackendPort: 9090,
+Each service gets its own listener port on the initiator side. If `LocalPort`
+is not set, it defaults to `BackendPort`.
+
+#### Incrementally add a service
+
+```go
+existing := []portal.ServiceConfig{
+    {SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+}
+
+bundle, err := portal.AddService(portal.TunnelConfig{
+    SourceContext:      "dp-cluster",
+    DestinationContext: "mgmt-cluster",
+    ResponderEndpoint:  "tunnel.example.com:10443",
+}, existing, portal.ServiceConfig{
+    SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317,
 })
+```
 
-// Generate certificates separately
-certs, err := portal.GenerateCertificates("my-tunnel", []string{"10.0.0.1"}, 24*time.Hour)
+The returned bundle includes manifests for **all** services (existing + new).
+Re-apply the full bundle to update both Envoy configs.
 
-// Provide external certificates (skip auto-generation)
+#### Bring your own certificates
+
+```go
 bundle, err := portal.RenderTunnel(portal.TunnelConfig{
-    // ...
+    SourceContext:      "dp-cluster",
+    DestinationContext: "mgmt-cluster",
+    ResponderEndpoint:  "tunnel.example.com:10443",
     ExternalCerts: &portal.ExternalCertificates{
         CACert:        caCertPEM,
         InitiatorCert: initCertPEM,
@@ -538,11 +703,41 @@ bundle, err := portal.RenderTunnel(portal.TunnelConfig{
         ResponderKey:  respKeyPEM,
     },
 })
+// bundle.Certs will be nil — no PKI was generated.
 ```
 
-The returned `ManifestBundle` contains `Source` and `Destination` resource
-slices (each with `Filename` and `Content` fields) plus a `Metadata` struct
-with tunnel information including the service configuration.
+#### Generate certificates independently
+
+Use `GenerateCertificates` when you need the PKI material but want to handle
+manifest rendering yourself:
+
+```go
+certs, err := portal.GenerateCertificates(
+    "my-tunnel",
+    []string{"tunnel.example.com", "10.0.0.50"}, // responder SANs
+    365 * 24 * time.Hour,
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+// certs.CACert, certs.CAKey — self-signed CA
+// certs.InitiatorCert, certs.InitiatorKey — client auth leaf
+// certs.ResponderCert, certs.ResponderKey — server auth leaf (with SANs)
+```
+
+#### Use with cert-manager
+
+```go
+bundle, err := portal.RenderTunnel(portal.TunnelConfig{
+    SourceContext:      "dp-cluster",
+    DestinationContext: "mgmt-cluster",
+    ResponderEndpoint:  "tunnel.example.com:10443",
+    CertManager:        true,
+})
+// bundle.Certs will be nil — cert-manager handles the PKI.
+// The manifests include Issuer and Certificate CRDs instead of Secrets.
+```
 
 ## Project Layout
 
