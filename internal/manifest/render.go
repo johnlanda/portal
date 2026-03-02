@@ -22,8 +22,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/tetratelabs/portal/internal/certs"
-	"github.com/tetratelabs/portal/internal/envoy"
+	"github.com/johnlanda/portal/internal/certs"
+	"github.com/johnlanda/portal/internal/envoy"
 )
 
 const (
@@ -478,7 +478,7 @@ func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
 				"app.kubernetes.io/name":       "portal-initiator",
 				"app.kubernetes.io/component":  "initiator",
 				"app.kubernetes.io/part-of":    "portal",
-				"portal.tetratelabs.io/tunnel": cfg.TunnelName,
+				"portal.johnlanda.io/tunnel": cfg.TunnelName,
 			},
 		},
 		"spec": map[string]interface{}{
@@ -494,7 +494,7 @@ func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
 						"app.kubernetes.io/name":       "portal-initiator",
 						"app.kubernetes.io/component":  "initiator",
 						"app.kubernetes.io/part-of":    "portal",
-						"portal.tetratelabs.io/tunnel": cfg.TunnelName,
+						"portal.johnlanda.io/tunnel": cfg.TunnelName,
 					},
 				},
 				"spec": map[string]interface{}{
@@ -577,7 +577,7 @@ func buildResponderDeployment(cfg TunnelConfig) (Resource, error) {
 				"app.kubernetes.io/name":       "portal-responder",
 				"app.kubernetes.io/component":  "responder",
 				"app.kubernetes.io/part-of":    "portal",
-				"portal.tetratelabs.io/tunnel": cfg.TunnelName,
+				"portal.johnlanda.io/tunnel": cfg.TunnelName,
 			},
 		},
 		"spec": map[string]interface{}{
@@ -593,7 +593,7 @@ func buildResponderDeployment(cfg TunnelConfig) (Resource, error) {
 						"app.kubernetes.io/name":       "portal-responder",
 						"app.kubernetes.io/component":  "responder",
 						"app.kubernetes.io/part-of":    "portal",
-						"portal.tetratelabs.io/tunnel": cfg.TunnelName,
+						"portal.johnlanda.io/tunnel": cfg.TunnelName,
 					},
 				},
 				"spec": map[string]interface{}{

@@ -21,8 +21,8 @@ package portal
 import (
 	"time"
 
-	"github.com/tetratelabs/portal/internal/certs"
-	"github.com/tetratelabs/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/certs"
+	"github.com/johnlanda/portal/internal/manifest"
 )
 
 // TunnelConfig contains all parameters needed to render a tunnel's manifests.

@@ -21,9 +21,8 @@ from the caller. This breaks down in common real-world topologies:
   GCP, Azure, and on-prem without VPN peering or shared network fabric.
 - **Zero-trust networking** -- Avoiding broad firewall rules by having the
   remote side initiate the connection outbound to a known endpoint.
-- **Management plane connectivity** -- A centralized control plane (e.g.,
-  Synapse) needs to configure and observe gateway deployments in clusters it
-  cannot directly reach.
+- **Management plane connectivity** -- A centralized control plane needs to
+  configure and observe deployments in clusters it cannot directly reach.
 
 A reverse tunnel inverts the connection model: the remote (initiator) cluster
 dials out to a publicly reachable endpoint on the destination (responder)
@@ -115,7 +114,7 @@ cluster on the responder side.
 Requires Go 1.23+.
 
 ```bash
-git clone https://github.com/tetratelabs/portal.git
+git clone https://github.com/johnlanda/portal.git
 cd portal
 go build -o portal ./cmd/portal
 ```
@@ -496,11 +495,45 @@ directory, which is git-ignored by default).
 ## Go Library API
 
 Portal can be used as a Go library for programmatic tunnel management. This is
-useful when you need to embed tunnel provisioning into a larger system (e.g., a
-Helm chart renderer, a Kubernetes operator, or a CI/CD pipeline).
+useful when you need to embed tunnel provisioning into a larger system -- for
+example, a Helm chart renderer, a Kubernetes operator, or a CI/CD pipeline.
 
 ```
-go get github.com/tetratelabs/portal
+go get github.com/johnlanda/portal
+```
+
+### How It Works
+
+The library is a **manifest renderer**. It takes a tunnel configuration and
+returns a `ManifestBundle` containing YAML-encoded Kubernetes resources for
+**both** sides of the tunnel. It does not apply anything to a cluster -- that
+is the caller's responsibility.
+
+This is an important distinction because the two sides of a tunnel typically
+live in different clusters with separate RBAC boundaries. A workload in
+Cluster A generally does not have permissions to create resources in Cluster B.
+The recommended pattern is:
+
+1. **Render** the tunnel from a location that knows the full configuration
+   (a provisioning controller, CI job, or local tooling).
+2. **Distribute** each side's manifests to the appropriate cluster -- via
+   `kubectl apply`, a GitOps controller (Argo CD, Flux), Helm, or any other
+   mechanism your platform already uses.
+
+```
+                  ┌──────────────────────┐
+                  │  Provisioning system │
+                  │  (CI, operator, CLI) │
+                  │                      │
+                  │  portal.RenderTunnel │
+                  └──────┬───────┬───────┘
+                         │       │
+            bundle.Source│       │bundle.Destination
+                         ▼       ▼
+               ┌──────────┐   ┌──────────┐
+               │ Cluster A │   │ Cluster B │
+               │ initiator │   │ responder │
+               └──────────┘   └──────────┘
 ```
 
 ### Functions
@@ -521,7 +554,10 @@ Kubernetes resources ready to be written to disk or applied to clusters.
 
 ```go
 type TunnelConfig struct {
-    // Required: kube context names identify the tunnel endpoints.
+    // Required: context names identify the tunnel endpoints. These are used
+    // to derive the tunnel name and label resources. When using the library
+    // purely for manifest rendering, they do not need to match real kubeconfig
+    // contexts — they are just identifiers.
     SourceContext      string
     DestinationContext string
 
@@ -605,7 +641,10 @@ type TunnelCertificates struct {
 
 ### Examples
 
-#### Render a single-service tunnel and write to disk
+#### Render a tunnel and write manifests to disk
+
+This is the most common pattern: render once, then distribute each side's
+manifests to the appropriate cluster through your deployment tooling.
 
 ```go
 package main
@@ -615,27 +654,27 @@ import (
     "os"
     "path/filepath"
 
-    "github.com/tetratelabs/portal"
+    "github.com/johnlanda/portal"
 )
 
 func main() {
     bundle, err := portal.RenderTunnel(portal.TunnelConfig{
-        SourceContext:      "dp-cluster",
-        DestinationContext: "mgmt-cluster",
+        SourceContext:      "cluster-a",
+        DestinationContext: "cluster-b",
         ResponderEndpoint:  "tunnel.example.com:10443",
     })
     if err != nil {
         log.Fatal(err)
     }
 
-    // Write source (initiator) manifests.
+    // Write source (initiator) manifests — apply these to Cluster A.
     for _, r := range bundle.Source {
         if err := os.WriteFile(filepath.Join("out/source", r.Filename), r.Content, 0o644); err != nil {
             log.Fatal(err)
         }
     }
 
-    // Write destination (responder) manifests.
+    // Write destination (responder) manifests — apply these to Cluster B.
     for _, r := range bundle.Destination {
         if err := os.WriteFile(filepath.Join("out/destination", r.Filename), r.Content, 0o644); err != nil {
             log.Fatal(err)
@@ -647,21 +686,29 @@ func main() {
         os.WriteFile("out/ca/ca.crt", bundle.Certs.CACert, 0o644)
         os.WriteFile("out/ca/ca.key", bundle.Certs.CAKey, 0o600)
     }
+
+    // Apply to each cluster separately:
+    //   kubectl apply -k out/destination/ --context cluster-b
+    //   kubectl apply -k out/source/     --context cluster-a
 }
 ```
+
+**Deployment order**: The responder (destination) side should be applied first
+so its LoadBalancer or endpoint is reachable before the initiator tries to
+connect.
 
 #### Multi-service tunnel with SNI routing
 
 ```go
 bundle, err := portal.RenderTunnelWithServices(portal.TunnelConfig{
-    SourceContext:      "dp-cluster",
-    DestinationContext: "mgmt-cluster",
+    SourceContext:      "cluster-a",
+    DestinationContext: "cluster-b",
     ResponderEndpoint:  "tunnel.example.com:10443",
-    Namespace:          "tunnels",          // override default namespace
+    Namespace:          "tunnels",           // override default namespace
     CertValidity:       30 * 24 * time.Hour, // 30-day certs
 }, []portal.ServiceConfig{
-    {SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
-    {SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317},
+    {SNI: "api", BackendHost: "api-server.app.svc", BackendPort: 8443},
+    {SNI: "otel", BackendHost: "otel-collector.monitoring.svc", BackendPort: 4317},
     {SNI: "metrics", BackendHost: "prometheus.monitoring.svc", BackendPort: 9090, LocalPort: 19090},
 })
 ```
@@ -673,27 +720,27 @@ is not set, it defaults to `BackendPort`.
 
 ```go
 existing := []portal.ServiceConfig{
-    {SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+    {SNI: "api", BackendHost: "api-server.app.svc", BackendPort: 8443},
 }
 
 bundle, err := portal.AddService(portal.TunnelConfig{
-    SourceContext:      "dp-cluster",
-    DestinationContext: "mgmt-cluster",
+    SourceContext:      "cluster-a",
+    DestinationContext: "cluster-b",
     ResponderEndpoint:  "tunnel.example.com:10443",
 }, existing, portal.ServiceConfig{
-    SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317,
+    SNI: "otel", BackendHost: "otel-collector.monitoring.svc", BackendPort: 4317,
 })
 ```
 
 The returned bundle includes manifests for **all** services (existing + new).
-Re-apply the full bundle to update both Envoy configs.
+Re-apply the full bundle to both clusters to update the Envoy configs.
 
 #### Bring your own certificates
 
 ```go
 bundle, err := portal.RenderTunnel(portal.TunnelConfig{
-    SourceContext:      "dp-cluster",
-    DestinationContext: "mgmt-cluster",
+    SourceContext:      "cluster-a",
+    DestinationContext: "cluster-b",
     ResponderEndpoint:  "tunnel.example.com:10443",
     ExternalCerts: &portal.ExternalCertificates{
         CACert:        caCertPEM,
@@ -730,8 +777,8 @@ if err != nil {
 
 ```go
 bundle, err := portal.RenderTunnel(portal.TunnelConfig{
-    SourceContext:      "dp-cluster",
-    DestinationContext: "mgmt-cluster",
+    SourceContext:      "cluster-a",
+    DestinationContext: "cluster-b",
     ResponderEndpoint:  "tunnel.example.com:10443",
     CertManager:        true,
 })

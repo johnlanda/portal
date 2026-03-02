@@ -33,7 +33,7 @@ linters:
       ignore-package-globs:
         # Internal packages — wrapping is enforced at package boundaries,
         # not within the same module.
-        - github.com/tetratelabs/portal/internal/*
+        - github.com/johnlanda/portal/internal/*
 
     errcheck:
       check-type-assertions: false

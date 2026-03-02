@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/tetratelabs/portal/internal/certs"
+	"github.com/johnlanda/portal/internal/certs"
 )
 
 // RotateConfig contains parameters for certificate rotation.

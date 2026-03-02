@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/state"
 )
 
 func setupListTestHooks(t *testing.T) string {

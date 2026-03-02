@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/state"
 	"gopkg.in/yaml.v3"
 )
 

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/portal/internal/kube"
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/kube"
+	"github.com/johnlanda/portal/internal/state"
 )
 
 func setupDisconnectTestHooks(t *testing.T) (srcMock, dstMock *mockKubeClient, storePath string) {

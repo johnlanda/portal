@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/tetratelabs/portal/internal/envoy"
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/envoy"
+	"github.com/johnlanda/portal/internal/state"
 )
 
 // exposeOpts holds all flags for the expose command.
@@ -341,7 +341,7 @@ func buildExposeService(ctxName, namespace, component, serviceName string, servi
 			"labels": map[string]interface{}{
 				"app.kubernetes.io/managed-by":  "portal",
 				"app.kubernetes.io/component":   "exposed-service",
-				"portal.tetratelabs.io/service": serviceName,
+				"portal.johnlanda.io/service": serviceName,
 			},
 		},
 		"spec": map[string]interface{}{

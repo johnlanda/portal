@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tetratelabs/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/manifest"
 )
 
 func TestRotateCertsCmdRequiresTunnelDir(t *testing.T) {

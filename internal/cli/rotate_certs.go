@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tetratelabs/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/manifest"
 )
 
 // NewRotateCertsCmd creates the `portal rotate-certs` command.

@@ -13,9 +13,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tetratelabs/portal/internal/envoy"
-	"github.com/tetratelabs/portal/internal/kube"
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/envoy"
+	"github.com/johnlanda/portal/internal/kube"
+	"github.com/johnlanda/portal/internal/state"
 )
 
 type statusOpts struct {

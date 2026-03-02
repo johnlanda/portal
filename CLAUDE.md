@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Portal is a CLI tool that creates secure, multiplexed Envoy reverse tunnels between Kubernetes clusters using mTLS (TLS 1.3, RSA 4096). It is part of the [Synapse workspace](../CLAUDE.md) — the management plane for Envoy AI Gateway deployments. Synapse uses Portal tunnels for worker-to-backend connectivity across clusters.
+Portal is a CLI tool and Go library that creates secure, multiplexed Envoy reverse tunnels between Kubernetes clusters using mTLS (TLS 1.3, RSA 4096).
 
-- **Module:** `github.com/tetratelabs/portal`
+- **Module:** `github.com/johnlanda/portal`
 - **Language:** Go 1.23
 - **License:** MIT
 - **Dependencies:** `cobra` (CLI), `gopkg.in/yaml.v3` (YAML rendering); no `k8s.io` client libraries

@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tetratelabs/portal/internal/kube"
-	"github.com/tetratelabs/portal/internal/manifest"
-	"github.com/tetratelabs/portal/internal/state"
+	"github.com/johnlanda/portal/internal/kube"
+	"github.com/johnlanda/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/state"
 )
 
 // placeholderEndpoint is used when re-rendering manifests for deletion.

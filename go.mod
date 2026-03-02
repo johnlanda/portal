@@ -1,4 +1,4 @@
-module github.com/tetratelabs/portal
+module github.com/johnlanda/portal
 
 go 1.23.0
 

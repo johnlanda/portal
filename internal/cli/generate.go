@@ -20,8 +20,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tetratelabs/portal/internal/envoy"
-	"github.com/tetratelabs/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/envoy"
+	"github.com/johnlanda/portal/internal/manifest"
 )
 
 // NewGenerateCmd creates the `portal generate` command.

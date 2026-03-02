@@ -2,7 +2,7 @@
 
 ## Project Context
 
-Portal (`github.com/tetratelabs/portal`) is a Go CLI that creates secure Envoy reverse tunnels between Kubernetes clusters. This document covers all packages, commands, testing, and change workflows.
+Portal (`github.com/johnlanda/portal`) is a Go CLI that creates secure Envoy reverse tunnels between Kubernetes clusters. This document covers all packages, commands, testing, and change workflows.
 
 ## Important Commands
 

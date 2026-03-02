@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/tetratelabs/portal/internal/cli"
+	"github.com/johnlanda/portal/internal/cli"
 )
 
 // Version is set at build time via -ldflags.
