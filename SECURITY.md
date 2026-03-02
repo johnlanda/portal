@@ -121,6 +121,22 @@ Both the initiator and responder enforce strict TLS settings:
 automatic renewal. The `renewBefore` is set to one-third of the certificate
 validity period.
 
+In cert-manager mode, the certificate lifecycle differs from built-in PKI in
+several important ways:
+
+- **CRDs replace raw Secrets**: Portal generates cert-manager Issuer and
+  Certificate resources instead of Kubernetes Secrets with embedded PEM data.
+  cert-manager provisions and rotates the Secrets automatically.
+- **CA key in-cluster**: The CA private key lives in a Kubernetes Secret
+  (`portal-tunnel-ca`) managed by cert-manager, rather than on the operator's
+  workstation. Key protection shifts to Kubernetes RBAC -- restrict Secret read
+  access in the tunnel namespace accordingly.
+- **`portal rotate-certs` is blocked**: cert-manager owns the renewal lifecycle.
+  Manual rotation via the CLI is not permitted.
+- **Monitoring**: Operators should monitor the `Ready` condition on Certificate
+  resources (`kubectl get certificate -n portal-system`) and alert on
+  `Ready=False` states, which indicate renewal failures.
+
 ### Certificate Storage
 
 | Location | Contents | Permissions |
@@ -217,6 +233,7 @@ Additionally:
 | DoS on the responder LoadBalancer | Configure cloud provider DDoS protection and rate limiting on the LB |
 | Compromised cluster control plane | Portal trusts the Kubernetes API; a compromised control plane can read Secrets |
 | Admin API exposure | Envoy admin binds to 127.0.0.1 by default; do not change this to 0.0.0.0 |
+| cert-manager unavailability | In cert-manager mode, certificates may fail to renew if cert-manager is down or misconfigured; monitor Certificate `Ready` condition |
 
 ### Alignment with Envoy's Threat Model
 

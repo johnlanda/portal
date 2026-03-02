@@ -327,7 +327,39 @@ Lists all tunnels from `~/.portal/tunnels.json` in a table format.
 
 ## Certificate Management
 
-Portal supports two certificate management modes:
+Portal supports two certificate management modes. Before choosing one, it
+helps to understand what Portal's TLS actually covers.
+
+### TLS Scope
+
+Portal secures the cross-cluster transport hop only. Traffic within each
+cluster travels over plaintext TCP:
+
+```
+  Source Cluster                           Destination Cluster
+  ┌─────────────────────────┐              ┌──────────────────────────┐
+  │ App                     │              │ Target Service           │
+  │   │                     │              │   ▲                      │
+  │   │ hop 1: plaintext    │              │   │ hop 3: plaintext     │
+  │   ▼                     │              │   │                      │
+  │ portal-initiator (Envoy)│              │ portal-responder (Envoy) │
+  │   │                     │              │   ▲                      │
+  └───┼─────────────────────┘              └───┼──────────────────────┘
+      │        hop 2: mTLS (TLS 1.3)           │
+      └────────────────────────────────────────┘
+```
+
+- **Hop 1** (App to initiator): Plaintext TCP inside the source cluster.
+- **Hop 2** (Initiator to responder): mTLS with TLS 1.3 -- this is what
+  Portal secures.
+- **Hop 3** (Responder to target service): Plaintext TCP inside the
+  destination cluster.
+
+If your services need end-to-end encryption, they should use their own TLS.
+The encrypted payload passes through the tunnel transparently as TCP data.
+Using cert-manager to secure your application services is orthogonal to
+Portal's `--cert-manager` flag, which only manages the tunnel transport
+certificates.
 
 ### Built-in PKI (default)
 
@@ -345,9 +377,48 @@ persisted locally for certificate rotation.
 With `--cert-manager`, Portal generates cert-manager Issuer and Certificate
 CRDs instead of raw Kubernetes Secrets. cert-manager handles automatic renewal.
 
+**Prerequisites**: cert-manager v1.0+ must be installed in both clusters
+before using this mode.
+
+**Usage**:
+
 ```bash
+# Imperative
 portal connect source dest --cert-manager
+
+# GitOps
+portal generate source dest \
+  --responder-endpoint "34.120.1.50:10443" \
+  --output-dir ./tunnel-manifests \
+  --cert-manager
 ```
+
+**Generated CRD chain**:
+
+```
+SelfSignedIssuer
+  └── CA Certificate (isCA: true, duration: 3x leaf validity)
+        └── CA Issuer (secretName: portal-tunnel-ca)
+              ├── Initiator Certificate (usages: client auth)
+              └── Responder Certificate (usages: server auth, SANs from endpoint)
+```
+
+All five CRDs are rendered into both the source and destination manifests so
+that each cluster has a complete, self-contained cert-manager chain.
+
+**Automatic renewal**: Leaf certificates set `renewBefore` to one-third of
+the validity period and `privateKey.rotationPolicy: Always`, so cert-manager
+rotates keys and reissues certificates automatically.
+
+**`portal rotate-certs` is blocked** in cert-manager mode because cert-manager
+owns the certificate lifecycle. Use `kubectl get certificate -n portal-system`
+to monitor renewal status.
+
+**No `ca/` directory** is created in cert-manager mode -- the CA private key
+lives in a Kubernetes Secret (`portal-tunnel-ca`) managed by cert-manager.
+
+**`--cert-validity` interaction**: Controls the leaf certificate duration. The
+CA certificate duration is automatically set to 3x the leaf value.
 
 ### External Certificates
 

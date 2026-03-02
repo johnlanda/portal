@@ -1002,6 +1002,90 @@ func TestRenderMultiService(t *testing.T) {
 	}
 }
 
+func TestRenderMultiServiceWithCertManager(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "tunnel.example.com:10443",
+		CertValidity:       24 * time.Hour,
+		CertManager:        true,
+		Services: []ServiceConfig{
+			{SNI: "backend", BackendHost: "backend-svc.synapse.svc", BackendPort: 8443, LocalPort: 18443},
+			{SNI: "otel", BackendHost: "otel-collector.synapse.svc", BackendPort: 4317},
+		},
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	// Certs should be nil in cert-manager mode.
+	if bundle.Certs != nil {
+		t.Error("Certs should be nil in cert-manager mode")
+	}
+
+	// Verify cert-manager CRDs are present on both sides.
+	for _, side := range []struct {
+		name      string
+		resources []Resource
+	}{
+		{"source", bundle.Source},
+		{"destination", bundle.Destination},
+	} {
+		assertResourceExists(t, side.resources, "cert-manager-selfsigned-issuer.yaml")
+		assertResourceExists(t, side.resources, "cert-manager-ca-certificate.yaml")
+		assertResourceExists(t, side.resources, "cert-manager-ca-issuer.yaml")
+	}
+	assertResourceExists(t, bundle.Source, "cert-manager-initiator-certificate.yaml")
+	assertResourceExists(t, bundle.Destination, "cert-manager-responder-certificate.yaml")
+
+	// Verify no raw TLS secrets.
+	if findResource(bundle.Source, "portal-tunnel-tls-secret.yaml") != nil {
+		t.Error("source should not have raw TLS secret in cert-manager mode")
+	}
+	if findResource(bundle.Destination, "portal-tunnel-tls-secret.yaml") != nil {
+		t.Error("destination should not have raw TLS secret in cert-manager mode")
+	}
+
+	// Verify responder bootstrap has tls_inspector for multi-service SNI routing.
+	responderCM := findResource(bundle.Destination, "portal-responder-bootstrap-cm.yaml")
+	if responderCM == nil {
+		t.Fatal("portal-responder-bootstrap-cm.yaml not found")
+	}
+	responderContent := string(responderCM.Content)
+	if !strings.Contains(responderContent, "tls_inspector") {
+		t.Error("responder bootstrap should contain tls_inspector for multi-service")
+	}
+	if !strings.Contains(responderContent, "backend") {
+		t.Error("responder bootstrap should reference 'backend' service")
+	}
+	if !strings.Contains(responderContent, "otel") {
+		t.Error("responder bootstrap should reference 'otel' service")
+	}
+
+	// Verify initiator bootstrap has per-service listeners.
+	initiatorCM := findResource(bundle.Source, "portal-initiator-bootstrap-cm.yaml")
+	if initiatorCM == nil {
+		t.Fatal("portal-initiator-bootstrap-cm.yaml not found")
+	}
+	initiatorContent := string(initiatorCM.Content)
+	if !strings.Contains(initiatorContent, "18443") {
+		t.Error("initiator bootstrap should contain custom local port 18443 for backend")
+	}
+	if !strings.Contains(initiatorContent, "4317") {
+		t.Error("initiator bootstrap should contain port 4317 for otel")
+	}
+
+	// Verify all resources are valid YAML.
+	for _, r := range append(bundle.Source, bundle.Destination...) {
+		var parsed map[string]interface{}
+		if err := yaml.Unmarshal(r.Content, &parsed); err != nil {
+			t.Errorf("%s is not valid YAML: %v", r.Filename, err)
+		}
+	}
+}
+
 func TestRenderWithExternalCerts(t *testing.T) {
 	cfg := TunnelConfig{
 		SourceContext:      "src",

@@ -14,6 +14,17 @@ import (
 	"time"
 )
 
+// TODO: Add E2E test for cert-manager mode. This requires installing cert-manager
+// in the KIND clusters (e.g., via kubectl apply of the cert-manager release manifest)
+// and verifying that:
+//   - portal connect --cert-manager creates Certificate and Issuer CRDs
+//   - cert-manager provisions the portal-tunnel-tls Secret from the Certificate CR
+//   - the tunnel establishes successfully using cert-manager-provisioned certs
+//   - portal rotate-certs is correctly blocked in cert-manager mode
+//
+// This is deferred because it adds significant infrastructure complexity to the
+// E2E test setup (cert-manager installation, CRD readiness checks, webhook availability).
+
 // TestE2E06_CertificateRotation verifies portal rotate-certs produces working certificates.
 //
 // Steps:
