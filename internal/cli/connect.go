@@ -95,10 +95,10 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 
 	// 2. Validate kube contexts exist.
 	if err := checkContextFn(sourceCtx); err != nil {
-		return err
+		return fmt.Errorf("source context validation failed: %w", err)
 	}
 	if err := checkContextFn(destCtx); err != nil {
-		return err
+		return fmt.Errorf("destination context validation failed: %w", err)
 	}
 
 	// Derive tunnel name.
@@ -124,7 +124,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 		}
 		bundle, err := renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts)
 		if err != nil {
-			return err
+			return fmt.Errorf("dry-run render failed: %w", err)
 		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintln(out, "# Source (initiator) cluster resources")
@@ -150,7 +150,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 		// Single-phase: endpoint is known.
 		bundle, err = renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to render manifests: %w", err)
 		}
 
 		// Apply destination resources.
@@ -167,7 +167,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 		sentinelAddr := fmt.Sprintf("%s:%d", sentinelEndpoint, opts.tunnelPort)
 		phase1Bundle, err := renderBundle(sourceCtx, destCtx, sentinelAddr, opts)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to render phase-1 manifests: %w", err)
 		}
 
 		// Phase 1: deploy destination (responder only listens).
@@ -185,7 +185,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 		realEndpoint := fmt.Sprintf("%s:%d", address, opts.tunnelPort)
 		bundle, err = renderBundle(sourceCtx, destCtx, realEndpoint, opts)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to render phase-2 manifests: %w", err)
 		}
 
 		// Update destination with correct certs and service config.
@@ -277,9 +277,10 @@ func saveConnectState(store *state.Store, bundle *manifest.ManifestBundle, sourc
 	var caCertPath string
 	if bundle.Certs != nil {
 		dir, err := state.DefaultDir()
-		if err == nil {
-			caCertPath = filepath.Join(dir, "certs", tunnelName, "ca.crt")
+		if err != nil {
+			return fmt.Errorf("failed to determine state directory for CA cert path: %w", err)
 		}
+		caCertPath = filepath.Join(dir, "certs", tunnelName, "ca.crt")
 	}
 
 	ts := state.TunnelState{
@@ -293,24 +294,27 @@ func saveConnectState(store *state.Store, bundle *manifest.ManifestBundle, sourc
 		Mode:               "imperative",
 	}
 
-	return store.Add(ts)
+	if err := store.Add(ts); err != nil {
+		return fmt.Errorf("failed to save tunnel state: %w", err)
+	}
+	return nil
 }
 
 // saveCACerts writes CA certificate material to ~/.portal/certs/<tunnel-name>/.
 func saveCACerts(tunnelName string, bundle *manifest.ManifestBundle) error {
 	dir, err := state.DefaultDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to determine state directory: %w", err)
 	}
 	certDir := filepath.Join(dir, "certs", tunnelName)
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return fmt.Errorf("failed to create cert directory: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(certDir, "ca.crt"), bundle.Certs.CACert, 0600); err != nil {
-		return err
+		return fmt.Errorf("failed to write CA certificate: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(certDir, "ca.key"), bundle.Certs.CAKey, 0600); err != nil {
-		return err
+		return fmt.Errorf("failed to write CA key: %w", err)
 	}
 	return nil
 }

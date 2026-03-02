@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -52,16 +53,16 @@ pod health, restart counts, and service endpoints.`,
 
 // tunnelStatus holds the computed status for a single tunnel.
 type tunnelStatus struct {
-	Name               string       `json:"name"`
-	SourceContext      string       `json:"source_context"`
-	DestinationContext string       `json:"destination_context"`
-	Namespace          string       `json:"namespace"`
-	TunnelPort         int          `json:"tunnel_port"`
-	Status             string       `json:"status"`
-	Initiator          *podStatus   `json:"initiator,omitempty"`
-	Responder          *podStatus   `json:"responder,omitempty"`
-	ResponderEndpoint  string       `json:"responder_endpoint,omitempty"`
-	Error              string       `json:"error,omitempty"`
+	Name               string     `json:"name"`
+	SourceContext      string     `json:"source_context"`
+	DestinationContext string     `json:"destination_context"`
+	Namespace          string     `json:"namespace"`
+	TunnelPort         int        `json:"tunnel_port"`
+	Status             string     `json:"status"`
+	Initiator          *podStatus `json:"initiator,omitempty"`
+	Responder          *podStatus `json:"responder,omitempty"`
+	ResponderEndpoint  string     `json:"responder_endpoint,omitempty"`
+	Error              string     `json:"error,omitempty"`
 }
 
 type podStatus struct {
@@ -253,27 +254,35 @@ func enrichWithEnvoyStats(s *tunnelStatus, ts state.TunnelState) {
 }
 
 // fetchEnvoyStats port-forwards to the Envoy admin port and queries /stats.
+// Returns nil with a logged warning on any failure — stats collection is best-effort.
 func fetchEnvoyStats(ctx context.Context, client kube.Client, podName string, adminPort int) *envoyStats {
 	localPort, err := findFreePort()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to find free port for %s stats: %v\n", podName, err)
 		return nil
 	}
 
 	session, err := client.PortForward(ctx, "pod/"+podName, localPort, adminPort)
-	if err != nil || session == nil {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to port-forward to %s: %v\n", podName, err)
 		return nil
 	}
-	defer session.Close()
+	if session == nil {
+		return nil
+	}
+	defer func() { _ = session.Close() }()
 
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/stats?usedonly&format=json", localPort))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to fetch stats from %s: %v\n", podName, err)
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to read stats response from %s: %v\n", podName, err)
 		return nil
 	}
 
@@ -319,10 +328,12 @@ func parseEnvoyStats(data []byte) *envoyStats {
 func findFreePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to listen on ephemeral port: %w", err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		return 0, fmt.Errorf("failed to close ephemeral listener: %w", err)
+	}
 	return port, nil
 }
 
@@ -432,13 +443,4 @@ func boolStr(b bool) string {
 		return "Yes"
 	}
 	return "No"
-}
-
-// statusSummaryLine returns a one-line status used by other commands.
-func statusSummaryLine(s tunnelStatus) string {
-	parts := []string{s.Name, s.Status}
-	if s.ResponderEndpoint != "" {
-		parts = append(parts, s.ResponderEndpoint)
-	}
-	return strings.Join(parts, "  ")
 }

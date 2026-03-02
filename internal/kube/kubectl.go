@@ -76,7 +76,7 @@ func (c *kubectlClient) WaitForServiceAddress(ctx context.Context, name string, 
 		if err != nil {
 			// If not found, keep polling; other errors are fatal.
 			if _, ok := err.(*NotFoundError); !ok {
-				return "", err
+				return "", fmt.Errorf("failed to get service %s: %w", name, err)
 			}
 		} else {
 			for _, ing := range svc.LoadBalancerIngress {
@@ -88,7 +88,7 @@ func (c *kubectlClient) WaitForServiceAddress(ctx context.Context, name string, 
 
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", fmt.Errorf("context cancelled while waiting for service/%s address: %w", name, ctx.Err())
 		case <-deadline:
 			return "", &TimeoutError{
 				Operation: fmt.Sprintf("waiting for service/%s address", name),
@@ -178,7 +178,7 @@ func waitForPort(port int, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -202,8 +202,8 @@ type podItem struct {
 		NodeName string `json:"nodeName"`
 	} `json:"spec"`
 	Status struct {
-		Phase             string             `json:"phase"`
-		PodIP             string             `json:"podIP"`
+		Phase             string                `json:"phase"`
+		PodIP             string                `json:"podIP"`
 		ContainerStatuses []containerStatusJSON `json:"containerStatuses"`
 	} `json:"status"`
 }
@@ -271,10 +271,10 @@ type serviceJSON struct {
 }
 
 type servicePortJSON struct {
-	Name       string      `json:"name"`
-	Protocol   string      `json:"protocol"`
-	Port       int32       `json:"port"`
-	TargetPort any `json:"targetPort"` // can be int or string
+	Name       string `json:"name"`
+	Protocol   string `json:"protocol"`
+	Port       int32  `json:"port"`
+	TargetPort any    `json:"targetPort"` // can be int or string
 }
 
 type lbIngressJSON struct {
@@ -307,10 +307,7 @@ func parseServiceJSON(data []byte) (*ServiceInfo, error) {
 
 	ingress := make([]LoadBalancerIngress, 0, len(svc.Status.LoadBalancer.Ingress))
 	for _, ing := range svc.Status.LoadBalancer.Ingress {
-		ingress = append(ingress, LoadBalancerIngress{
-			IP:       ing.IP,
-			Hostname: ing.Hostname,
-		})
+		ingress = append(ingress, LoadBalancerIngress(ing))
 	}
 
 	return &ServiceInfo{

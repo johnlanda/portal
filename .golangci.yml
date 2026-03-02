@@ -1,0 +1,58 @@
+# golangci-lint configuration for Portal.
+# Enforces godoc-lint rules, error handling, and standard Go linters.
+
+version: "2"
+
+run:
+  timeout: 5m
+
+formatters:
+  enable:
+    - gofmt         # Formatting enforcement
+
+linters:
+  enable:
+    - errcheck      # Detect unchecked errors
+    - govet         # Go vet checks
+    - godoclint     # Enforce godoc comment standards
+    - wrapcheck     # Ensure errors from external packages are wrapped
+    - thelper       # Detect test helpers missing t.Helper()
+
+  settings:
+    godoclint:
+      # Require doc comments on all exported symbols.
+      require-doc: true
+      # Enforce "SymbolName does..." style for doc comments.
+      start-with-name: true
+      # Require package-level doc comments (// Package <name> ...).
+      pkg-doc: true
+      # Validate deprecation format.
+      deprecated: true
+
+    wrapcheck:
+      ignore-package-globs:
+        # Internal packages — wrapping is enforced at package boundaries,
+        # not within the same module.
+        - github.com/tetratelabs/portal/internal/*
+
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+      exclude-functions:
+        # cobra.MarkFlagRequired panics on invalid flag names, so the error
+        # return is safe to discard.
+        - (*github.com/spf13/cobra.Command).MarkFlagRequired
+        # fmt.Fprint* writing to cmd stdout/stderr in a CLI tool — these
+        # are user-facing output and cannot meaningfully fail.
+        - fmt.Fprint
+        - fmt.Fprintln
+        - fmt.Fprintf
+
+  exclusions:
+    rules:
+      # Test files are allowed more flexibility with error checking and docs.
+      - path: _test\.go
+        linters:
+          - wrapcheck
+          - errcheck
+          - godoclint

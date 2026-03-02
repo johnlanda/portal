@@ -177,7 +177,7 @@ func runGenerateExpose(cmd *cobra.Command, kubeContext, serviceName string, port
 
 	tunnel, role, err := findTunnelForContext(store, kubeContext, "")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to find tunnel for context %q: %w", kubeContext, err)
 	}
 
 	ns := tunnel.Namespace

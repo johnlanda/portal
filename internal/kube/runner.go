@@ -3,6 +3,7 @@ package kube
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 )
 
@@ -24,7 +25,10 @@ func (p *Process) Stop() error {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	return p.cmd.Process.Kill()
+	if err := p.cmd.Process.Kill(); err != nil {
+		return fmt.Errorf("failed to kill process: %w", err)
+	}
+	return nil
 }
 
 // execRunner is the default CommandRunner using os/exec.
@@ -45,7 +49,7 @@ func (r *execRunner) Run(ctx context.Context, stdin []byte, name string, args ..
 func (r *execRunner) Start(ctx context.Context, name string, args ...string) (*Process, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to start %s: %w", name, err)
 	}
 	return &Process{cmd: cmd}, nil
 }

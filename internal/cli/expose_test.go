@@ -533,6 +533,8 @@ func TestExposeTunnelFlagDisambiguates(t *testing.T) {
 func TestExposeInvalidContext(t *testing.T) {
 	setupExposeTestHooks(t)
 
+	origCheckContext := checkContextFn
+	t.Cleanup(func() { checkContextFn = origCheckContext })
 	checkContextFn = func(ctx string) error {
 		return fmt.Errorf("kube context %q not found in kubeconfig", ctx)
 	}

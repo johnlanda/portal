@@ -80,9 +80,9 @@ func buildInitiatorCertificate(tunnelName, namespace string, validity time.Durat
 			"namespace": namespace,
 		},
 		"spec": map[string]interface{}{
-			"commonName": "portal-initiator/" + tunnelName,
-			"secretName": "portal-tunnel-tls",
-			"duration":   validity.String(),
+			"commonName":  "portal-initiator/" + tunnelName,
+			"secretName":  "portal-tunnel-tls",
+			"duration":    validity.String(),
 			"renewBefore": renewBefore,
 			"usages": []interface{}{
 				"client auth",
@@ -119,9 +119,9 @@ func buildResponderCertificate(tunnelName, namespace string, validity time.Durat
 	}
 
 	spec := map[string]interface{}{
-		"commonName": "portal-responder/" + tunnelName,
-		"secretName": "portal-tunnel-tls",
-		"duration":   validity.String(),
+		"commonName":  "portal-responder/" + tunnelName,
+		"secretName":  "portal-tunnel-tls",
+		"duration":    validity.String(),
 		"renewBefore": renewBefore,
 		"usages": []interface{}{
 			"server auth",

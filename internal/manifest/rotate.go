@@ -42,7 +42,7 @@ func RotateCertificates(cfg RotateConfig) (*TunnelMetadata, error) {
 	// Read CA material.
 	caCert, caKey, err := readCAMaterial(filepath.Join(cfg.TunnelDir, "ca"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read CA material: %w", err)
 	}
 
 	// Determine certificate validity: flag > tunnel.yaml > default.

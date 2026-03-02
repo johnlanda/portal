@@ -14,16 +14,16 @@ import (
 
 // mockKubeClient implements kube.Client for testing.
 type mockKubeClient struct {
-	applyFn                func(ctx context.Context, yamls [][]byte) error
-	deleteFn               func(ctx context.Context, yamls [][]byte) error
-	waitForDeploymentFn    func(ctx context.Context, name string, timeout time.Duration) error
-	waitForServiceAddrFn   func(ctx context.Context, name string, timeout time.Duration) (string, error)
-	portForwardFn          func(ctx context.Context, target string, localPort, remotePort int) (*kube.PortForwardSession, error)
-	getPodsFn              func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error)
-	getServiceFn           func(ctx context.Context, name string) (*kube.ServiceInfo, error)
-	rolloutRestartFn       func(ctx context.Context, deployment string) error
+	applyFn              func(ctx context.Context, yamls [][]byte) error
+	deleteFn             func(ctx context.Context, yamls [][]byte) error
+	waitForDeploymentFn  func(ctx context.Context, name string, timeout time.Duration) error
+	waitForServiceAddrFn func(ctx context.Context, name string, timeout time.Duration) (string, error)
+	portForwardFn        func(ctx context.Context, target string, localPort, remotePort int) (*kube.PortForwardSession, error)
+	getPodsFn            func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error)
+	getServiceFn         func(ctx context.Context, name string) (*kube.ServiceInfo, error)
+	rolloutRestartFn     func(ctx context.Context, deployment string) error
 
-	applyCalls         int
+	applyCalls          int
 	rolloutRestartCalls int
 }
 
@@ -566,6 +566,8 @@ func TestConnectInvalidContext(t *testing.T) {
 	setupTestHooks(t)
 
 	// Override checkContextFn to reject unknown contexts.
+	origCheckContext := checkContextFn
+	t.Cleanup(func() { checkContextFn = origCheckContext })
 	checkContextFn = func(ctx string) error {
 		if ctx == "bad-context" {
 			return fmt.Errorf("kube context %q not found in kubeconfig", ctx)

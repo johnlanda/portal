@@ -383,6 +383,8 @@ func TestStatusWithEnvoyStats(t *testing.T) {
 	}
 
 	// Mock stats to return canned data.
+	origFetchStats := fetchEnvoyStatsFn
+	t.Cleanup(func() { fetchEnvoyStatsFn = origFetchStats })
 	fetchEnvoyStatsFn = func(ctx context.Context, client kube.Client, podName string, adminPort int) *envoyStats {
 		if podName == "portal-initiator-abc123" {
 			return &envoyStats{
@@ -490,6 +492,8 @@ func TestStatusJSONWithStats(t *testing.T) {
 		return []kube.PodInfo{{Name: "resp-pod", Phase: kube.PodRunning, Ready: true}}, nil
 	}
 
+	origFetchStats := fetchEnvoyStatsFn
+	t.Cleanup(func() { fetchEnvoyStatsFn = origFetchStats })
 	fetchEnvoyStatsFn = func(ctx context.Context, client kube.Client, podName string, adminPort int) *envoyStats {
 		return &envoyStats{
 			UptimeSeconds:     3600,

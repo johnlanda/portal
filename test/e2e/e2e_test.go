@@ -41,6 +41,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	portalBin = portalBinary
+	// Clean up the temp directory holding the compiled binary after tests.
+	defer os.RemoveAll(filepath.Dir(portalBin))
 
 	if err := ensureCluster(sourceCluster); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create source cluster: %v\n", err)

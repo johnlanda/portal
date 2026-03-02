@@ -5,6 +5,7 @@ import "time"
 // PodPhase represents the phase of a Kubernetes pod.
 type PodPhase string
 
+// Standard Kubernetes pod phases.
 const (
 	PodPending   PodPhase = "Pending"
 	PodRunning   PodPhase = "Running"

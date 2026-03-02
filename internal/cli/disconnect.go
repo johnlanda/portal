@@ -56,10 +56,10 @@ func runDisconnect(cmd *cobra.Command, sourceCtx, destCtx string, opts disconnec
 
 	// 2. Validate kube contexts exist.
 	if err := checkContextFn(sourceCtx); err != nil {
-		return err
+		return fmt.Errorf("source context validation failed: %w", err)
 	}
 	if err := checkContextFn(destCtx); err != nil {
-		return err
+		return fmt.Errorf("destination context validation failed: %w", err)
 	}
 
 	tunnelName := sourceCtx + "--" + destCtx

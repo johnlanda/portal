@@ -57,7 +57,7 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 
 	// 2. Validate kube context exists.
 	if err := checkContextFn(kubeContext); err != nil {
-		return err
+		return fmt.Errorf("context validation failed: %w", err)
 	}
 
 	// 3. Load state, find tunnel where kubeContext is source or destination.
@@ -68,7 +68,7 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 
 	tunnel, role, err := findTunnelForContext(store, kubeContext, opts.tunnel)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to find tunnel for context %q: %w", kubeContext, err)
 	}
 
 	// 3. Check if service:port already exposed.
@@ -132,7 +132,9 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 
 	// 8. Update state with the new service entry.
 	sf, err := store.Load()
-	if err == nil {
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to load tunnel state for update: %v\n", err)
+	} else {
 		for i := range sf.Tunnels {
 			if sf.Tunnels[i].Name == tunnel.Name {
 				sf.Tunnels[i].Services = append(sf.Tunnels[i].Services, entry)

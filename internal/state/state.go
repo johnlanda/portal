@@ -56,7 +56,7 @@ func DefaultDir() (string, error) {
 func DefaultPath() (string, error) {
 	dir, err := DefaultDir()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to resolve default path: %w", err)
 	}
 	return filepath.Join(dir, "tunnels.json"), nil
 }
@@ -82,7 +82,7 @@ func (s *Store) Add(t TunnelState) error {
 
 	sf, err := s.loadLocked()
 	if err != nil {
-		return err
+		return fmt.Errorf("loading state for add: %w", err)
 	}
 
 	for _, existing := range sf.Tunnels {
@@ -92,7 +92,10 @@ func (s *Store) Add(t TunnelState) error {
 	}
 
 	sf.Tunnels = append(sf.Tunnels, t)
-	return s.saveLocked(sf)
+	if err := s.saveLocked(sf); err != nil {
+		return fmt.Errorf("saving state after add: %w", err)
+	}
+	return nil
 }
 
 // Remove deletes a tunnel by name. Returns an error if not found.
@@ -102,7 +105,7 @@ func (s *Store) Remove(name string) error {
 
 	sf, err := s.loadLocked()
 	if err != nil {
-		return err
+		return fmt.Errorf("loading state for remove: %w", err)
 	}
 
 	idx := -1
@@ -117,7 +120,10 @@ func (s *Store) Remove(name string) error {
 	}
 
 	sf.Tunnels = append(sf.Tunnels[:idx], sf.Tunnels[idx+1:]...)
-	return s.saveLocked(sf)
+	if err := s.saveLocked(sf); err != nil {
+		return fmt.Errorf("saving state after remove: %w", err)
+	}
+	return nil
 }
 
 // Get returns the tunnel with the given name, or nil if not found.
@@ -127,7 +133,7 @@ func (s *Store) Get(name string) (*TunnelState, error) {
 
 	sf, err := s.loadLocked()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading state for get: %w", err)
 	}
 
 	for i := range sf.Tunnels {
@@ -145,7 +151,7 @@ func (s *Store) List() ([]TunnelState, error) {
 
 	sf, err := s.loadLocked()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading state for list: %w", err)
 	}
 	return sf.Tunnels, nil
 }
@@ -186,17 +192,17 @@ func (s *Store) saveLocked(sf *StateFile) error {
 	tmpName := tmp.Name()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	if err := os.Rename(tmpName, s.path); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 	return nil

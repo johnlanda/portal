@@ -9,6 +9,7 @@ type KubectlError struct {
 	Err     error
 }
 
+// Error returns a human-readable description of the kubectl failure.
 func (e *KubectlError) Error() string {
 	if e.Stderr != "" {
 		return fmt.Sprintf("kubectl %s: %s", e.Command, e.Stderr)
@@ -16,6 +17,7 @@ func (e *KubectlError) Error() string {
 	return fmt.Sprintf("kubectl %s: %v", e.Command, e.Err)
 }
 
+// Unwrap returns the underlying error for use with errors.Is/As.
 func (e *KubectlError) Unwrap() error {
 	return e.Err
 }
@@ -26,6 +28,7 @@ type TimeoutError struct {
 	Duration  string
 }
 
+// Error returns a human-readable description of the timeout.
 func (e *TimeoutError) Error() string {
 	return fmt.Sprintf("%s timed out after %s", e.Operation, e.Duration)
 }
@@ -35,6 +38,7 @@ type NotFoundError struct {
 	Resource string
 }
 
+// Error returns a human-readable description of the missing resource.
 func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("resource not found: %s", e.Resource)
 }

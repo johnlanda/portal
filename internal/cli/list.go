@@ -60,5 +60,8 @@ func runList(cmd *cobra.Command, outputJSON bool) error {
 			age,
 		)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("failed to flush output: %w", err)
+	}
+	return nil
 }
