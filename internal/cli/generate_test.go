@@ -626,6 +626,66 @@ func TestGenerateExposeSourceService(t *testing.T) {
 	}
 }
 
+func TestGenerateWithServices(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "svc-output")
+
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--output-dir", outputDir,
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--service", "backend=backend-svc.synapse.svc:8443",
+		"--service", "otel=otel-collector.synapse.svc:4317",
+		"--service-local-port", "backend=18443",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify initiator bootstrap contains multi-service config (tls_inspector/SNI).
+	bootstrapBytes, err := os.ReadFile(filepath.Join(outputDir, "source", "portal-initiator-bootstrap-cm.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read initiator bootstrap: %v", err)
+	}
+	bootstrap := string(bootstrapBytes)
+	if !strings.Contains(bootstrap, "backend") {
+		t.Error("initiator bootstrap should reference 'backend' service")
+	}
+	if !strings.Contains(bootstrap, "otel") {
+		t.Error("initiator bootstrap should reference 'otel' service")
+	}
+
+	// Verify responder bootstrap contains SNI routing.
+	responderBytes, err := os.ReadFile(filepath.Join(outputDir, "destination", "portal-responder-bootstrap-cm.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read responder bootstrap: %v", err)
+	}
+	responder := string(responderBytes)
+	if !strings.Contains(responder, "tls_inspector") {
+		t.Error("responder bootstrap should contain tls_inspector for multi-service")
+	}
+
+	// Verify tunnel.yaml records services.
+	metaBytes, err := os.ReadFile(filepath.Join(outputDir, "tunnel.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read tunnel.yaml: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := yaml.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("tunnel.yaml is not valid YAML: %v", err)
+	}
+	services, ok := meta["services"].([]interface{})
+	if !ok {
+		t.Fatalf("expected services in tunnel.yaml, got %T", meta["services"])
+	}
+	if len(services) != 2 {
+		t.Errorf("expected 2 services in metadata, got %d", len(services))
+	}
+}
+
 func TestGenerateExposeContextNotFound(t *testing.T) {
 	setupGenerateExposeHooks(t)
 

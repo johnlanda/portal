@@ -39,6 +39,8 @@ type connectOpts struct {
 	connectionCount   int
 	certValidity      time.Duration
 	certDir           string
+	initiatorCertDir  string
+	responderCertDir  string
 	certManager       bool
 	envoyImage        string
 	envoyLogLevel     string
@@ -46,6 +48,8 @@ type connectOpts struct {
 	deployTimeout     time.Duration
 	lbTimeout         time.Duration
 	dryRun            bool
+	serviceFlags      []string
+	serviceLocalPorts []string
 }
 
 // NewConnectCmd creates the `portal connect` command.
@@ -76,6 +80,8 @@ before deploying the initiator.`,
 	cmd.Flags().IntVar(&opts.connectionCount, "connection-count", manifest.DefaultConnectionCount, "Number of reverse connections to maintain")
 	cmd.Flags().DurationVar(&opts.certValidity, "cert-validity", 8760*time.Hour, "Certificate validity duration")
 	cmd.Flags().StringVar(&opts.certDir, "cert-dir", "", "Use existing certificates instead of generating")
+	cmd.Flags().StringVar(&opts.initiatorCertDir, "initiator-cert-dir", "", "Directory with initiator certs (tls.crt, tls.key, ca.crt)")
+	cmd.Flags().StringVar(&opts.responderCertDir, "responder-cert-dir", "", "Directory with responder certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().BoolVar(&opts.certManager, "cert-manager", false, "Use cert-manager CRDs for certificate management")
 	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", manifest.DefaultEnvoyImage, "Envoy proxy image")
 	cmd.Flags().StringVar(&opts.envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
@@ -83,6 +89,8 @@ before deploying the initiator.`,
 	cmd.Flags().DurationVar(&opts.deployTimeout, "deploy-timeout", 5*time.Minute, "Timeout waiting for deployment readiness")
 	cmd.Flags().DurationVar(&opts.lbTimeout, "lb-timeout", 5*time.Minute, "Timeout waiting for LoadBalancer address")
 	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print rendered manifests to stdout without applying")
+	cmd.Flags().StringArrayVar(&opts.serviceFlags, "service", nil, "Service to route through the tunnel (format: sni=host:port); can be repeated")
+	cmd.Flags().StringArrayVar(&opts.serviceLocalPorts, "service-local-port", nil, "Override initiator listener port for a service (format: sni=port); can be repeated")
 
 	return cmd
 }
@@ -99,6 +107,12 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 	}
 	if err := checkContextFn(destCtx); err != nil {
 		return fmt.Errorf("destination context validation failed: %w", err)
+	}
+
+	// Parse service flags.
+	services, err := parseServiceFlags(opts.serviceFlags, opts.serviceLocalPorts)
+	if err != nil {
+		return fmt.Errorf("invalid service flags: %w", err)
 	}
 
 	// Derive tunnel name.
@@ -122,7 +136,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 		if opts.responderEndpoint == "" {
 			return fmt.Errorf("--responder-endpoint is required for --dry-run (cannot discover LB address)")
 		}
-		bundle, err := renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts)
+		bundle, err := renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts, services)
 		if err != nil {
 			return fmt.Errorf("dry-run render failed: %w", err)
 		}
@@ -148,7 +162,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 
 	if opts.responderEndpoint != "" {
 		// Single-phase: endpoint is known.
-		bundle, err = renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts)
+		bundle, err = renderBundle(sourceCtx, destCtx, opts.responderEndpoint, opts, services)
 		if err != nil {
 			return fmt.Errorf("failed to render manifests: %w", err)
 		}
@@ -165,7 +179,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 	} else {
 		// Two-phase: deploy responder first, discover LB, re-render with real address.
 		sentinelAddr := fmt.Sprintf("%s:%d", sentinelEndpoint, opts.tunnelPort)
-		phase1Bundle, err := renderBundle(sourceCtx, destCtx, sentinelAddr, opts)
+		phase1Bundle, err := renderBundle(sourceCtx, destCtx, sentinelAddr, opts, services)
 		if err != nil {
 			return fmt.Errorf("failed to render phase-1 manifests: %w", err)
 		}
@@ -183,7 +197,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 
 		// Phase 2: re-render with real endpoint.
 		realEndpoint := fmt.Sprintf("%s:%d", address, opts.tunnelPort)
-		bundle, err = renderBundle(sourceCtx, destCtx, realEndpoint, opts)
+		bundle, err = renderBundle(sourceCtx, destCtx, realEndpoint, opts, services)
 		if err != nil {
 			return fmt.Errorf("failed to render phase-2 manifests: %w", err)
 		}
@@ -238,7 +252,7 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 }
 
 // renderBundle builds a TunnelConfig and calls manifest.Render.
-func renderBundle(sourceCtx, destCtx, endpoint string, opts connectOpts) (*manifest.ManifestBundle, error) {
+func renderBundle(sourceCtx, destCtx, endpoint string, opts connectOpts, services []manifest.ServiceConfig) (*manifest.ManifestBundle, error) {
 	cfg := manifest.TunnelConfig{
 		SourceContext:      sourceCtx,
 		DestinationContext: destCtx,
@@ -251,7 +265,10 @@ func renderBundle(sourceCtx, destCtx, endpoint string, opts connectOpts) (*manif
 		EnvoyLogLevel:      opts.envoyLogLevel,
 		ServiceType:        opts.serviceType,
 		CertDir:            opts.certDir,
+		InitiatorCertDir:   opts.initiatorCertDir,
+		ResponderCertDir:   opts.responderCertDir,
 		CertManager:        opts.certManager,
+		Services:           services,
 	}
 
 	bundle, err := manifest.Render(cfg)
@@ -292,6 +309,25 @@ func saveConnectState(store *state.Store, bundle *manifest.ManifestBundle, sourc
 		CreatedAt:          time.Now().UTC(),
 		CACertPath:         caCertPath,
 		Mode:               "imperative",
+	}
+
+	// Store service entries if services were declared at connect time.
+	if bundle.Metadata.Services != nil {
+		for _, svc := range bundle.Metadata.Services {
+			lp := svc.LocalPort
+			if lp == 0 {
+				lp = svc.BackendPort
+			}
+			ts.Services = append(ts.Services, fmt.Sprintf("%s:%d", svc.SNI, svc.BackendPort))
+			ts.ServiceEntries = append(ts.ServiceEntries, state.ServiceEntry{
+				Name:      svc.SNI,
+				Namespace: "", // namespace is embedded in BackendHost for connect-time services
+				Port:      svc.BackendPort,
+				LocalPort: lp,
+				SNI:       svc.SNI,
+				Direction: "destination",
+			})
+		}
 	}
 
 	if err := store.Add(ts); err != nil {

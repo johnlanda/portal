@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,17 +16,76 @@ type StateFile struct {
 	Tunnels []TunnelState `json:"tunnels"`
 }
 
+// ServiceEntry describes a service routed through a tunnel.
+type ServiceEntry struct {
+	// Name is the service name (used as SNI if SNI is empty).
+	Name string `json:"name"`
+	// Namespace is the Kubernetes namespace of the backend service.
+	Namespace string `json:"namespace,omitempty"`
+	// Port is the backend service port.
+	Port int `json:"port"`
+	// LocalPort is the initiator listener port (0 = use Port).
+	LocalPort int `json:"local_port,omitempty"`
+	// SNI is the Server Name Indication for routing (defaults to Name).
+	SNI string `json:"sni"`
+	// Direction is "source" or "destination" indicating where the backend lives.
+	Direction string `json:"direction,omitempty"`
+}
+
 // TunnelState records metadata about a deployed tunnel.
 type TunnelState struct {
-	Name               string    `json:"name"`
-	SourceContext      string    `json:"source_context"`
-	DestinationContext string    `json:"destination_context"`
-	Namespace          string    `json:"namespace"`
-	TunnelPort         int       `json:"tunnel_port"`
-	CreatedAt          time.Time `json:"created_at"`
-	CACertPath         string    `json:"ca_cert_path,omitempty"`
-	Mode               string    `json:"mode"`
-	Services           []string  `json:"services"`
+	Name               string         `json:"name"`
+	SourceContext      string         `json:"source_context"`
+	DestinationContext string         `json:"destination_context"`
+	Namespace          string         `json:"namespace"`
+	TunnelPort         int            `json:"tunnel_port"`
+	CreatedAt          time.Time      `json:"created_at"`
+	CACertPath         string         `json:"ca_cert_path,omitempty"`
+	Mode               string         `json:"mode"`
+	Services           []string       `json:"services"`
+	ServiceEntries     []ServiceEntry `json:"service_entries,omitempty"`
+}
+
+// AllServiceEntries returns a merged list of service entries from both the legacy
+// Services field and the new ServiceEntries field. Legacy entries are parsed from
+// the "name:port" format.
+func (ts *TunnelState) AllServiceEntries() []ServiceEntry {
+	seen := make(map[string]bool)
+	var result []ServiceEntry
+
+	// New-style entries take precedence.
+	for _, se := range ts.ServiceEntries {
+		key := fmt.Sprintf("%s:%d", se.Name, se.Port)
+		seen[key] = true
+		result = append(result, se)
+	}
+
+	// Parse legacy "name:port" entries.
+	for _, svc := range ts.Services {
+		parts := strings.SplitN(svc, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		port := 0
+		if _, err := fmt.Sscanf(parts[1], "%d", &port); err != nil {
+			continue
+		}
+		if port == 0 {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", parts[0], port)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, ServiceEntry{
+			Name: parts[0],
+			Port: port,
+			SNI:  parts[0],
+		})
+	}
+
+	return result
 }
 
 // Store provides thread-safe CRUD operations on the tunnel state file.
@@ -122,6 +182,34 @@ func (s *Store) Remove(name string) error {
 	sf.Tunnels = append(sf.Tunnels[:idx], sf.Tunnels[idx+1:]...)
 	if err := s.saveLocked(sf); err != nil {
 		return fmt.Errorf("saving state after remove: %w", err)
+	}
+	return nil
+}
+
+// Update replaces a tunnel in the state file by name. Returns an error if not found.
+func (s *Store) Update(t TunnelState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sf, err := s.loadLocked()
+	if err != nil {
+		return fmt.Errorf("loading state for update: %w", err)
+	}
+
+	found := false
+	for i := range sf.Tunnels {
+		if sf.Tunnels[i].Name == t.Name {
+			sf.Tunnels[i] = t
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("tunnel %q not found", t.Name)
+	}
+
+	if err := s.saveLocked(sf); err != nil {
+		return fmt.Errorf("saving state after update: %w", err)
 	}
 	return nil
 }

@@ -1,0 +1,67 @@
+# Portal responder (destination cluster) Envoy bootstrap — multi-service TCP proxy mode.
+# SNI-based routing: tls_inspector reads SNI from ClientHello without terminating TLS,
+# then routes to the matching backend cluster via per-service filter chains.
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: {{.AdminPort}}
+
+static_resources:
+  listeners:
+    - name: tunnel_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: {{.ListenPort}}
+      listener_filters:
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+      filter_chains:
+{{- range .Services}}
+        - filter_chain_match:
+            server_names:
+              - "{{.SNI}}"
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: svc_{{.StatPrefix}}
+                cluster: {{.ClusterName}}
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: TLSv1_3
+                tls_certificates:
+                  - certificate_chain:
+                      filename: {{$.CertPath}}/tls.crt
+                    private_key:
+                      filename: {{$.CertPath}}/tls.key
+                validation_context:
+                  trusted_ca:
+                    filename: {{$.CertPath}}/ca.crt
+                alpn_protocols:
+                  - h2
+{{- end}}
+
+  clusters:
+{{- range .Services}}
+    - name: {{.ClusterName}}
+      connect_timeout: 5s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: {{.ClusterName}}
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: {{.BackendHost}}
+                      port_value: {{.BackendPort}}
+{{- end}}

@@ -33,11 +33,15 @@ func NewGenerateCmd() *cobra.Command {
 		connectionCount   int
 		certValidity      time.Duration
 		certDir           string
+		initiatorCertDir  string
+		responderCertDir  string
 		certManager       bool
 		envoyImage        string
 		envoyLogLevel     string
 		responderEndpoint string
 		serviceType       string
+		serviceFlags      []string
+		serviceLocalPorts []string
 	)
 
 	cmd := &cobra.Command{
@@ -64,6 +68,11 @@ The --responder-endpoint flag is required. Pass either:
 				return fmt.Errorf("--responder-endpoint is required for generate")
 			}
 
+			services, err := parseServiceFlags(serviceFlags, serviceLocalPorts)
+			if err != nil {
+				return fmt.Errorf("invalid service flags: %w", err)
+			}
+
 			cfg := manifest.TunnelConfig{
 				SourceContext:      sourceContext,
 				DestinationContext: destinationContext,
@@ -76,7 +85,10 @@ The --responder-endpoint flag is required. Pass either:
 				EnvoyLogLevel:      envoyLogLevel,
 				ServiceType:        serviceType,
 				CertDir:            certDir,
+				InitiatorCertDir:   initiatorCertDir,
+				ResponderCertDir:   responderCertDir,
 				CertManager:        certManager,
+				Services:           services,
 			}
 
 			bundle, err := manifest.Render(cfg)
@@ -113,10 +125,14 @@ The --responder-endpoint flag is required. Pass either:
 	cmd.Flags().IntVar(&connectionCount, "connection-count", manifest.DefaultConnectionCount, "Number of reverse connections to maintain")
 	cmd.Flags().DurationVar(&certValidity, "cert-validity", 8760*time.Hour, "Certificate validity duration")
 	cmd.Flags().StringVar(&certDir, "cert-dir", "", "Use existing certificates instead of generating")
+	cmd.Flags().StringVar(&initiatorCertDir, "initiator-cert-dir", "", "Directory with initiator certs (tls.crt, tls.key, ca.crt)")
+	cmd.Flags().StringVar(&responderCertDir, "responder-cert-dir", "", "Directory with responder certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().BoolVar(&certManager, "cert-manager", false, "Use cert-manager CRDs for certificate management instead of raw secrets")
 	cmd.Flags().StringVar(&envoyImage, "envoy-image", manifest.DefaultEnvoyImage, "Envoy proxy image")
 	cmd.Flags().StringVar(&envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
 	cmd.Flags().StringVar(&serviceType, "service-type", manifest.DefaultServiceType, "Responder Service type (LoadBalancer, NodePort, ClusterIP)")
+	cmd.Flags().StringArrayVar(&serviceFlags, "service", nil, "Service to route through the tunnel (format: sni=host:port); can be repeated")
+	cmd.Flags().StringArrayVar(&serviceLocalPorts, "service-local-port", nil, "Override initiator listener port for a service (format: sni=port); can be repeated")
 
 	cmd.AddCommand(newGenerateExposeCmd())
 

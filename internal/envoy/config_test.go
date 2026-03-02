@@ -254,3 +254,268 @@ func TestRenderInitiatorBootstrapSNIDefaultsToHost(t *testing.T) {
 		t.Error("SNI should default to ResponderHost when not set")
 	}
 }
+
+// --- Multi-service template tests ---
+
+func TestRenderResponderMultiBootstrapSingleService(t *testing.T) {
+	cfg := ResponderMultiServiceConfig{
+		ListenPort: 10443,
+		CertPath:   "/etc/portal/certs",
+		Services: []ServiceRoute{
+			{SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+		},
+	}
+
+	data, err := RenderResponderMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderResponderMultiBootstrap() error = %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v\n%s", err, data)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, "tls_inspector") {
+		t.Error("rendered config does not contain tls_inspector listener filter")
+	}
+	if !strings.Contains(s, `"backend"`) {
+		t.Error("rendered config does not contain SNI value 'backend'")
+	}
+	if !strings.Contains(s, "backend-svc.ns.svc") {
+		t.Error("rendered config does not contain backend host")
+	}
+	if !strings.Contains(s, "port_value: 8443") {
+		t.Error("rendered config does not contain backend port")
+	}
+	if !strings.Contains(s, "require_client_certificate: true") {
+		t.Error("rendered config does not require client certificate")
+	}
+	if !strings.Contains(s, "tls_minimum_protocol_version: TLSv1_3") {
+		t.Error("rendered config does not enforce TLS 1.3")
+	}
+}
+
+func TestRenderResponderMultiBootstrapTwoServices(t *testing.T) {
+	cfg := ResponderMultiServiceConfig{
+		ListenPort: 10443,
+		CertPath:   "/etc/portal/certs",
+		Services: []ServiceRoute{
+			{SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+			{SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317},
+		},
+	}
+
+	data, err := RenderResponderMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderResponderMultiBootstrap() error = %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v\n%s", err, data)
+	}
+
+	s := string(data)
+	// Both SNI values should be present.
+	if !strings.Contains(s, `"backend"`) {
+		t.Error("rendered config does not contain SNI 'backend'")
+	}
+	if !strings.Contains(s, `"otel"`) {
+		t.Error("rendered config does not contain SNI 'otel'")
+	}
+	// Both backend hosts should be present.
+	if !strings.Contains(s, "backend-svc.ns.svc") {
+		t.Error("rendered config does not contain backend host")
+	}
+	if !strings.Contains(s, "otel-collector.ns.svc") {
+		t.Error("rendered config does not contain otel host")
+	}
+	// Both cluster names should be present.
+	if !strings.Contains(s, "cluster: backend") {
+		t.Error("rendered config does not contain cluster name 'backend'")
+	}
+	if !strings.Contains(s, "cluster: otel") {
+		t.Error("rendered config does not contain cluster name 'otel'")
+	}
+	// tls_inspector must be present.
+	if !strings.Contains(s, "tls_inspector") {
+		t.Error("rendered config does not contain tls_inspector")
+	}
+}
+
+func TestRenderResponderMultiBootstrapDefaults(t *testing.T) {
+	cfg := ResponderMultiServiceConfig{
+		Services: []ServiceRoute{
+			{SNI: "backend", BackendHost: "backend-svc.svc", BackendPort: 8443},
+		},
+	}
+
+	data, err := RenderResponderMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderResponderMultiBootstrap() error = %v", err)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, "port_value: 10443") {
+		t.Error("should use default listen port")
+	}
+	if !strings.Contains(s, "port_value: 15001") {
+		t.Error("should use default admin port")
+	}
+	if !strings.Contains(s, "/etc/portal/certs/") {
+		t.Error("should use default cert path")
+	}
+}
+
+func TestRenderInitiatorMultiBootstrapSingleService(t *testing.T) {
+	cfg := InitiatorMultiServiceConfig{
+		ResponderHost: "10.0.0.1",
+		ResponderPort: 10443,
+		CertPath:      "/etc/portal/certs",
+		Services: []ServiceListener{
+			{Name: "backend", ListenPort: 18443, SNI: "backend"},
+		},
+	}
+
+	data, err := RenderInitiatorMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderInitiatorMultiBootstrap() error = %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v\n%s", err, data)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, "svc_backend") {
+		t.Error("rendered config does not contain listener name")
+	}
+	if !strings.Contains(s, "port_value: 18443") {
+		t.Error("rendered config does not contain listen port")
+	}
+	if !strings.Contains(s, "tunnel_to_backend") {
+		t.Error("rendered config does not contain cluster name")
+	}
+	if !strings.Contains(s, "sni: backend") {
+		t.Error("rendered config does not contain SNI")
+	}
+	if !strings.Contains(s, "10.0.0.1") {
+		t.Error("rendered config does not contain responder host")
+	}
+	if !strings.Contains(s, "tls_minimum_protocol_version: TLSv1_3") {
+		t.Error("rendered config does not enforce TLS 1.3")
+	}
+	if !strings.Contains(s, "tls_maximum_protocol_version: TLSv1_3") {
+		t.Error("rendered config does not set TLS 1.3 maximum")
+	}
+	if !strings.Contains(s, "- h2") {
+		t.Error("rendered config does not contain ALPN h2")
+	}
+}
+
+func TestRenderInitiatorMultiBootstrapTwoServices(t *testing.T) {
+	cfg := InitiatorMultiServiceConfig{
+		ResponderHost: "tunnel.example.com",
+		ResponderPort: 10443,
+		CertPath:      "/etc/portal/certs",
+		Services: []ServiceListener{
+			{Name: "backend", ListenPort: 18443, SNI: "backend"},
+			{Name: "otel", ListenPort: 14317, SNI: "otel"},
+		},
+	}
+
+	data, err := RenderInitiatorMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderInitiatorMultiBootstrap() error = %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v\n%s", err, data)
+	}
+
+	s := string(data)
+	// Both listeners should be present.
+	if !strings.Contains(s, "svc_backend") {
+		t.Error("rendered config does not contain backend listener")
+	}
+	if !strings.Contains(s, "svc_otel") {
+		t.Error("rendered config does not contain otel listener")
+	}
+	// Both ports should be present.
+	if !strings.Contains(s, "port_value: 18443") {
+		t.Error("rendered config does not contain backend listen port")
+	}
+	if !strings.Contains(s, "port_value: 14317") {
+		t.Error("rendered config does not contain otel listen port")
+	}
+	// Both clusters should be present.
+	if !strings.Contains(s, "tunnel_to_backend") {
+		t.Error("rendered config does not contain backend cluster")
+	}
+	if !strings.Contains(s, "tunnel_to_otel") {
+		t.Error("rendered config does not contain otel cluster")
+	}
+	// Both SNI values should be present.
+	if !strings.Contains(s, "sni: backend") {
+		t.Error("rendered config does not contain backend SNI")
+	}
+	if !strings.Contains(s, "sni: otel") {
+		t.Error("rendered config does not contain otel SNI")
+	}
+	// All clusters point to same responder.
+	if strings.Count(s, "tunnel.example.com") < 2 {
+		t.Error("both clusters should reference the responder host")
+	}
+}
+
+func TestRenderInitiatorMultiBootstrapDefaults(t *testing.T) {
+	cfg := InitiatorMultiServiceConfig{
+		ResponderHost: "10.0.0.1",
+		Services: []ServiceListener{
+			{Name: "backend", ListenPort: 18443},
+		},
+	}
+
+	data, err := RenderInitiatorMultiBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderInitiatorMultiBootstrap() error = %v", err)
+	}
+
+	s := string(data)
+	if !strings.Contains(s, "port_value: 15000") {
+		t.Error("should use default admin port")
+	}
+	if !strings.Contains(s, "/etc/portal/certs/") {
+		t.Error("should use default cert path")
+	}
+	// SNI should default to service name.
+	if !strings.Contains(s, "sni: backend") {
+		t.Error("SNI should default to service name")
+	}
+	// ListenAddress should default to 0.0.0.0.
+	if !strings.Contains(s, "address: 0.0.0.0") {
+		t.Error("ListenAddress should default to 0.0.0.0")
+	}
+}
+
+func TestSanitizeStatPrefix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"backend", "backend"},
+		{"otel-collector", "otel_collector"},
+		{"my.service.name", "my_service_name"},
+		{"svc_123", "svc_123"},
+	}
+	for _, tt := range tests {
+		got := sanitizeStatPrefix(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeStatPrefix(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

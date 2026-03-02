@@ -15,6 +15,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +49,32 @@ const (
 	certMountPath = "/etc/portal/certs"
 )
 
+// ServiceConfig describes a service to be routed through the tunnel.
+type ServiceConfig struct {
+	// SNI is the Server Name Indication value used for routing (also used as service name).
+	SNI string
+	// BackendHost is the backend service address (FQDN).
+	BackendHost string
+	// BackendPort is the backend service port.
+	BackendPort int
+	// LocalPort is the initiator listener port (0 = use BackendPort).
+	LocalPort int
+}
+
+// ExternalCertificates holds PEM-encoded certificate material provided externally.
+type ExternalCertificates struct {
+	// CACert is the PEM-encoded CA certificate.
+	CACert []byte
+	// InitiatorCert is the PEM-encoded initiator client certificate.
+	InitiatorCert []byte
+	// InitiatorKey is the PEM-encoded initiator client private key.
+	InitiatorKey []byte
+	// ResponderCert is the PEM-encoded responder server certificate.
+	ResponderCert []byte
+	// ResponderKey is the PEM-encoded responder server private key.
+	ResponderKey []byte
+}
+
 // TunnelConfig contains all parameters needed to render a tunnel's manifests.
 type TunnelConfig struct {
 	TunnelName         string
@@ -62,6 +90,10 @@ type TunnelConfig struct {
 	ServiceType        string // LoadBalancer, NodePort, ClusterIP
 	CertDir            string // Use existing certs instead of generating
 	CertManager        bool   // Use cert-manager CRDs instead of raw secrets
+	Services           []ServiceConfig
+	InitiatorCertDir   string                // Separate cert path for initiator
+	ResponderCertDir   string                // Separate cert path for responder
+	ExternalCerts      *ExternalCertificates // PEM bytes for library API
 }
 
 // ManifestBundle contains all rendered Kubernetes resources for both sides of a tunnel.
@@ -80,19 +112,20 @@ type Resource struct {
 
 // TunnelMetadata stores information about the tunnel for the metadata file.
 type TunnelMetadata struct {
-	TunnelName         string     `yaml:"tunnelName"`
-	SourceContext      string     `yaml:"sourceContext"`
-	DestinationContext string     `yaml:"destinationContext"`
-	Namespace          string     `yaml:"namespace"`
-	TunnelPort         int        `yaml:"tunnelPort"`
-	ResponderEndpoint  string     `yaml:"responderEndpoint"`
-	EnvoyImage         string     `yaml:"envoyImage"`
-	ServiceType        string     `yaml:"serviceType"`
-	CreatedAt          time.Time  `yaml:"createdAt"`
-	CertValidity       string     `yaml:"certValidity,omitempty"`
-	ResponderSANs      []string   `yaml:"responderSANs,omitempty"`
-	LastRotatedAt      *time.Time `yaml:"lastRotatedAt,omitempty"`
-	RotationCount      int        `yaml:"rotationCount,omitempty"`
+	TunnelName         string          `yaml:"tunnelName"`
+	SourceContext      string          `yaml:"sourceContext"`
+	DestinationContext string          `yaml:"destinationContext"`
+	Namespace          string          `yaml:"namespace"`
+	TunnelPort         int             `yaml:"tunnelPort"`
+	ResponderEndpoint  string          `yaml:"responderEndpoint"`
+	EnvoyImage         string          `yaml:"envoyImage"`
+	ServiceType        string          `yaml:"serviceType"`
+	CreatedAt          time.Time       `yaml:"createdAt"`
+	CertValidity       string          `yaml:"certValidity,omitempty"`
+	ResponderSANs      []string        `yaml:"responderSANs,omitempty"`
+	LastRotatedAt      *time.Time      `yaml:"lastRotatedAt,omitempty"`
+	RotationCount      int             `yaml:"rotationCount,omitempty"`
+	Services           []ServiceConfig `yaml:"services,omitempty"`
 }
 
 // Render generates a complete ManifestBundle for a tunnel.
@@ -114,24 +147,66 @@ func Render(cfg TunnelConfig) (*ManifestBundle, error) {
 	// Build responder SANs.
 	responderSANs := []string{host}
 
-	// Render initiator Envoy bootstrap.
-	initiatorBootstrap, err := envoy.RenderInitiatorBootstrap(envoy.InitiatorConfig{
-		ResponderHost: host,
-		ResponderPort: port,
-		ListenPort:    cfg.TunnelPort,
-		CertPath:      certMountPath,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to render initiator bootstrap: %w", err)
-	}
+	var initiatorBootstrap, responderBootstrap []byte
 
-	// Render responder Envoy bootstrap.
-	responderBootstrap, err := envoy.RenderResponderBootstrap(envoy.ResponderConfig{
-		ListenPort: cfg.TunnelPort,
-		CertPath:   certMountPath,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to render responder bootstrap: %w", err)
+	if len(cfg.Services) > 0 {
+		// Multi-service mode: use SNI-based routing.
+		var routes []envoy.ServiceRoute
+		var listeners []envoy.ServiceListener
+		for _, svc := range cfg.Services {
+			lp := svc.LocalPort
+			if lp == 0 {
+				lp = svc.BackendPort
+			}
+			routes = append(routes, envoy.ServiceRoute{
+				SNI:         svc.SNI,
+				BackendHost: svc.BackendHost,
+				BackendPort: svc.BackendPort,
+			})
+			listeners = append(listeners, envoy.ServiceListener{
+				Name:       svc.SNI,
+				ListenPort: lp,
+				SNI:        svc.SNI,
+			})
+		}
+
+		initiatorBootstrap, err = envoy.RenderInitiatorMultiBootstrap(envoy.InitiatorMultiServiceConfig{
+			ResponderHost: host,
+			ResponderPort: port,
+			CertPath:      certMountPath,
+			Services:      listeners,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to render initiator bootstrap: %w", err)
+		}
+
+		responderBootstrap, err = envoy.RenderResponderMultiBootstrap(envoy.ResponderMultiServiceConfig{
+			ListenPort: cfg.TunnelPort,
+			CertPath:   certMountPath,
+			Services:   routes,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to render responder bootstrap: %w", err)
+		}
+	} else {
+		// Single-service mode: backward-compatible path.
+		initiatorBootstrap, err = envoy.RenderInitiatorBootstrap(envoy.InitiatorConfig{
+			ResponderHost: host,
+			ResponderPort: port,
+			ListenPort:    cfg.TunnelPort,
+			CertPath:      certMountPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to render initiator bootstrap: %w", err)
+		}
+
+		responderBootstrap, err = envoy.RenderResponderBootstrap(envoy.ResponderConfig{
+			ListenPort: cfg.TunnelPort,
+			CertPath:   certMountPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to render responder bootstrap: %w", err)
+		}
 	}
 
 	// Build source (initiator) cluster resources.
@@ -164,6 +239,40 @@ func Render(cfg TunnelConfig) (*ManifestBundle, error) {
 		src.resources = append(src.resources, cmSource...)
 		dst.resources = append(dst.resources, cmShared...)
 		dst.resources = append(dst.resources, cmDest...)
+	} else if cfg.ExternalCerts != nil {
+		// External certificates provided as PEM bytes (library API).
+		// Build secrets from provided material; skip CA key storage.
+		src.add(buildSecret("portal-tunnel-tls", cfg.Namespace,
+			cfg.ExternalCerts.InitiatorCert, cfg.ExternalCerts.InitiatorKey, cfg.ExternalCerts.CACert))
+		dst.add(buildSecret("portal-tunnel-tls", cfg.Namespace,
+			cfg.ExternalCerts.ResponderCert, cfg.ExternalCerts.ResponderKey, cfg.ExternalCerts.CACert))
+	} else if cfg.InitiatorCertDir != "" || cfg.ResponderCertDir != "" {
+		// Split cert directories: initiator and responder certs from separate paths.
+		initiatorDir := cfg.InitiatorCertDir
+		responderDir := cfg.ResponderCertDir
+		if initiatorDir == "" || responderDir == "" {
+			return nil, fmt.Errorf("both --initiator-cert-dir and --responder-cert-dir must be specified together")
+		}
+		initCerts, err := loadCertsFromDir(initiatorDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load initiator certificates from %s: %w", initiatorDir, err)
+		}
+		respCerts, err := loadCertsFromDir(responderDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load responder certificates from %s: %w", responderDir, err)
+		}
+		src.add(buildSecret("portal-tunnel-tls", cfg.Namespace, initCerts.cert, initCerts.key, initCerts.ca))
+		dst.add(buildSecret("portal-tunnel-tls", cfg.Namespace, respCerts.cert, respCerts.key, respCerts.ca))
+	} else if cfg.CertDir != "" {
+		// Shared cert directory: both sides use certs from one path.
+		certFiles, err := loadCertsFromDir(cfg.CertDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load certificates from %s: %w", cfg.CertDir, err)
+		}
+		// When using a shared cert dir, the same cert/key is used for both sides.
+		// This is typically used when certs are pre-generated externally.
+		src.add(buildSecret("portal-tunnel-tls", cfg.Namespace, certFiles.cert, certFiles.key, certFiles.ca))
+		dst.add(buildSecret("portal-tunnel-tls", cfg.Namespace, certFiles.cert, certFiles.key, certFiles.ca))
 	} else {
 		// Standard mode: generate certs and build raw secrets.
 		tunnelCerts, err = certs.GenerateTunnelCertificates(cfg.TunnelName, responderSANs, cfg.CertValidity)
@@ -202,6 +311,7 @@ func Render(cfg TunnelConfig) (*ManifestBundle, error) {
 		CreatedAt:          time.Now().UTC(),
 		CertValidity:       cfg.CertValidity.String(),
 		ResponderSANs:      responderSANs,
+		Services:           cfg.Services,
 	}
 
 	return &ManifestBundle{
@@ -331,6 +441,33 @@ func buildSecret(name, namespace string, cert, key, ca []byte) (Resource, error)
 }
 
 func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
+	// Build container ports.
+	var containerPorts []interface{}
+	if len(cfg.Services) > 0 {
+		for _, svc := range cfg.Services {
+			lp := svc.LocalPort
+			if lp == 0 {
+				lp = svc.BackendPort
+			}
+			containerPorts = append(containerPorts, map[string]interface{}{
+				"name":          fmt.Sprintf("svc-%s", svc.SNI),
+				"containerPort": lp,
+				"protocol":      "TCP",
+			})
+		}
+	} else {
+		containerPorts = append(containerPorts, map[string]interface{}{
+			"name":          "tunnel",
+			"containerPort": cfg.TunnelPort,
+			"protocol":      "TCP",
+		})
+	}
+	containerPorts = append(containerPorts, map[string]interface{}{
+		"name":          "admin",
+		"containerPort": envoy.DefaultInitiatorAdminPort,
+		"protocol":      "TCP",
+	})
+
 	dep := map[string]interface{}{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -371,18 +508,7 @@ func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
 								"-c", "/etc/envoy/envoy.yaml",
 								"--log-level", cfg.EnvoyLogLevel,
 							},
-							"ports": []interface{}{
-								map[string]interface{}{
-									"name":          "tunnel",
-									"containerPort": cfg.TunnelPort,
-									"protocol":      "TCP",
-								},
-								map[string]interface{}{
-									"name":          "admin",
-									"containerPort": envoy.DefaultInitiatorAdminPort,
-									"protocol":      "TCP",
-								},
-							},
+							"ports": containerPorts,
 							"volumeMounts": []interface{}{
 								map[string]interface{}{
 									"name":      "bootstrap",
@@ -598,6 +724,26 @@ func buildResponderService(cfg TunnelConfig, host string, isIP bool) (Resource, 
 }
 
 func buildInitiatorNetworkPolicy(cfg TunnelConfig) (Resource, error) {
+	// Build ingress ports: one per service listener, or the tunnel port for single-service.
+	var ingressPorts []interface{}
+	if len(cfg.Services) > 0 {
+		for _, svc := range cfg.Services {
+			lp := svc.LocalPort
+			if lp == 0 {
+				lp = svc.BackendPort
+			}
+			ingressPorts = append(ingressPorts, map[string]interface{}{
+				"protocol": "TCP",
+				"port":     lp,
+			})
+		}
+	} else {
+		ingressPorts = append(ingressPorts, map[string]interface{}{
+			"protocol": "TCP",
+			"port":     cfg.TunnelPort,
+		})
+	}
+
 	np := map[string]interface{}{
 		"apiVersion": "networking.k8s.io/v1",
 		"kind":       "NetworkPolicy",
@@ -624,12 +770,7 @@ func buildInitiatorNetworkPolicy(cfg TunnelConfig) (Resource, error) {
 							"namespaceSelector": map[string]interface{}{},
 						},
 					},
-					"ports": []interface{}{
-						map[string]interface{}{
-							"protocol": "TCP",
-							"port":     cfg.TunnelPort,
-						},
-					},
+					"ports": ingressPorts,
 				},
 			},
 			"egress": []interface{}{
@@ -731,4 +872,28 @@ func (c *resourceCollector) add(r Resource, err error) {
 		return
 	}
 	c.resources = append(c.resources, r)
+}
+
+// certBundle holds PEM-encoded cert material loaded from a directory.
+type certBundle struct {
+	cert []byte
+	key  []byte
+	ca   []byte
+}
+
+// loadCertsFromDir reads tls.crt, tls.key, and ca.crt from the given directory.
+func loadCertsFromDir(dir string) (*certBundle, error) {
+	cert, err := os.ReadFile(filepath.Join(dir, "tls.crt"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tls.crt: %w", err)
+	}
+	key, err := os.ReadFile(filepath.Join(dir, "tls.key"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tls.key: %w", err)
+	}
+	ca, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ca.crt: %w", err)
+	}
+	return &certBundle{cert: cert, key: key, ca: ca}, nil
 }

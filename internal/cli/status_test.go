@@ -23,6 +23,7 @@ func setupStatusTestHooks(t *testing.T) (srcMock, dstMock *mockKubeClient, store
 	origCheckContext := checkContextFn
 	origNewStateStore := newStateStore
 	origFetchStats := fetchEnvoyStatsFn
+	origFetchClusterHealth := fetchClusterHealthFn
 
 	newKubeClient = func(kubeContext, namespace string) kube.Client {
 		if strings.HasPrefix(kubeContext, "src") {
@@ -42,6 +43,9 @@ func setupStatusTestHooks(t *testing.T) (srcMock, dstMock *mockKubeClient, store
 	fetchEnvoyStatsFn = func(ctx context.Context, client kube.Client, podName string, adminPort int) *envoyStats {
 		return nil
 	}
+	fetchClusterHealthFn = func(ctx context.Context, client kube.Client, podName string, adminPort int) map[string]bool {
+		return nil
+	}
 
 	t.Cleanup(func() {
 		newKubeClient = origNewKubeClient
@@ -49,6 +53,7 @@ func setupStatusTestHooks(t *testing.T) (srcMock, dstMock *mockKubeClient, store
 		checkContextFn = origCheckContext
 		newStateStore = origNewStateStore
 		fetchEnvoyStatsFn = origFetchStats
+		fetchClusterHealthFn = origFetchClusterHealth
 	})
 
 	return srcMock, dstMock, storePath
@@ -524,6 +529,160 @@ func TestStatusJSONWithStats(t *testing.T) {
 	}
 	if !strings.Contains(output, `"bytes_sent": 1024`) {
 		t.Errorf("expected bytes_sent in JSON, got:\n%s", output)
+	}
+}
+
+func TestStatusWithServices(t *testing.T) {
+	srcMock, dstMock, storePath := setupStatusTestHooks(t)
+
+	// Add tunnel with service entries.
+	store := state.NewStore(storePath)
+	if err := store.Add(state.TunnelState{
+		Name:               "src-cluster--dst-cluster",
+		SourceContext:      "src-cluster",
+		DestinationContext: "dst-cluster",
+		Namespace:          "portal-system",
+		TunnelPort:         10443,
+		CreatedAt:          time.Now(),
+		Mode:               "imperative",
+		ServiceEntries: []state.ServiceEntry{
+			{Name: "backend", SNI: "backend", Port: 8443, LocalPort: 18443, Direction: "destination"},
+			{Name: "otel", SNI: "otel", Port: 4317, Direction: "destination"},
+		},
+	}); err != nil {
+		t.Fatalf("failed to add test tunnel: %v", err)
+	}
+
+	srcMock.getPodsFn = func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "init-pod", Phase: kube.PodRunning, Ready: true}}, nil
+	}
+	dstMock.getPodsFn = func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "resp-pod", Phase: kube.PodRunning, Ready: true}}, nil
+	}
+
+	// Mock cluster health to return healthy clusters.
+	origFetchCluster := fetchClusterHealthFn
+	t.Cleanup(func() { fetchClusterHealthFn = origFetchCluster })
+	fetchClusterHealthFn = func(ctx context.Context, client kube.Client, podName string, adminPort int) map[string]bool {
+		return map[string]bool{
+			"backend_to_backend": true,
+			"backend_to_otel":    true,
+		}
+	}
+
+	var buf strings.Builder
+	cmd := NewStatusCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"src-cluster", "dst-cluster"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Services:") {
+		t.Errorf("expected 'Services:' in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "backend") {
+		t.Errorf("expected 'backend' service in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "otel") {
+		t.Errorf("expected 'otel' service in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "healthy") {
+		t.Errorf("expected 'healthy' in output, got:\n%s", output)
+	}
+}
+
+func TestStatusServicesJSON(t *testing.T) {
+	srcMock, dstMock, storePath := setupStatusTestHooks(t)
+
+	store := state.NewStore(storePath)
+	if err := store.Add(state.TunnelState{
+		Name:               "src-cluster--dst-cluster",
+		SourceContext:      "src-cluster",
+		DestinationContext: "dst-cluster",
+		Namespace:          "portal-system",
+		TunnelPort:         10443,
+		CreatedAt:          time.Now(),
+		Mode:               "imperative",
+		ServiceEntries: []state.ServiceEntry{
+			{Name: "backend", SNI: "backend", Port: 8443, Direction: "destination"},
+		},
+	}); err != nil {
+		t.Fatalf("failed to add test tunnel: %v", err)
+	}
+
+	srcMock.getPodsFn = func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "init-pod", Phase: kube.PodRunning, Ready: true}}, nil
+	}
+	dstMock.getPodsFn = func(ctx context.Context, labelSelector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "resp-pod", Phase: kube.PodRunning, Ready: true}}, nil
+	}
+
+	var buf strings.Builder
+	cmd := NewStatusCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"src-cluster", "dst-cluster", "--json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, `"services"`) {
+		t.Errorf("expected 'services' in JSON output, got:\n%s", output)
+	}
+	if !strings.Contains(output, `"sni": "backend"`) {
+		t.Errorf("expected service SNI in JSON output, got:\n%s", output)
+	}
+}
+
+func TestParseClusterHealth(t *testing.T) {
+	data := []byte(`{
+		"cluster_statuses": [
+			{
+				"name": "backend_to_backend",
+				"host_statuses": [
+					{"health_status": {"eds_health_status": "HEALTHY"}}
+				]
+			},
+			{
+				"name": "backend_to_otel",
+				"host_statuses": [
+					{"health_status": {"eds_health_status": "UNHEALTHY"}}
+				]
+			},
+			{
+				"name": "backend_to_empty",
+				"host_statuses": []
+			}
+		]
+	}`)
+
+	health := parseClusterHealth(data)
+	if health == nil {
+		t.Fatal("expected non-nil health")
+	}
+	if !health["backend_to_backend"] {
+		t.Error("backend_to_backend should be healthy")
+	}
+	if health["backend_to_otel"] {
+		t.Error("backend_to_otel should be unhealthy")
+	}
+	if health["backend_to_empty"] {
+		t.Error("backend_to_empty should be unhealthy (no hosts)")
+	}
+}
+
+func TestParseClusterHealthInvalidJSON(t *testing.T) {
+	health := parseClusterHealth([]byte("not json"))
+	if health != nil {
+		t.Error("expected nil health for invalid JSON")
 	}
 }
 

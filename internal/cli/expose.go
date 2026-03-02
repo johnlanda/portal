@@ -16,6 +16,8 @@ type exposeOpts struct {
 	port             int
 	serviceNamespace string
 	tunnel           string
+	localPort        int
+	sni              string
 }
 
 // NewExposeCmd creates the `portal expose` command.
@@ -32,6 +34,9 @@ proxy pod and updates the Envoy configuration to route traffic to the service.
 
 When exposing a destination service (natural tunnel direction), the responder's
 Envoy config is updated and the pod is restarted to apply the new route.
+The initiator config is also updated to add a new listener for the service.
+
+Each call is additive — new services are added alongside existing ones.
 
 When exposing a source service (reverse direction), only the ClusterIP Service is
 created. Actual traffic routing for this direction requires reverse tunneling (Phase 2).`,
@@ -45,6 +50,8 @@ created. Actual traffic routing for this direction requires reverse tunneling (P
 	_ = cmd.MarkFlagRequired("port")
 	cmd.Flags().StringVar(&opts.serviceNamespace, "service-namespace", "default", "Namespace of the service being exposed")
 	cmd.Flags().StringVar(&opts.tunnel, "tunnel", "", "Tunnel name to use (required when context matches multiple tunnels)")
+	cmd.Flags().IntVar(&opts.localPort, "local-port", 0, "Initiator listener port (default: same as --port)")
+	cmd.Flags().StringVar(&opts.sni, "sni", "", "Custom SNI value for routing (default: service name)")
 
 	return cmd
 }
@@ -71,10 +78,15 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 		return fmt.Errorf("failed to find tunnel for context %q: %w", kubeContext, err)
 	}
 
-	// 3. Check if service:port already exposed.
+	// 3. Check if service:port already exposed (check both legacy and new entries).
 	entry := fmt.Sprintf("%s:%d", serviceName, opts.port)
 	for _, svc := range tunnel.Services {
 		if svc == entry {
+			return fmt.Errorf("service %q is already exposed on tunnel %s", entry, tunnel.Name)
+		}
+	}
+	for _, se := range tunnel.ServiceEntries {
+		if se.Name == serviceName && se.Port == opts.port {
 			return fmt.Errorf("service %q is already exposed on tunnel %s", entry, tunnel.Name)
 		}
 	}
@@ -85,6 +97,16 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 	originClient := newKubeClient(kubeContext, opts.serviceNamespace)
 	if _, err := originClient.GetService(ctx, serviceName); err != nil {
 		return fmt.Errorf("service %q not found in context %q namespace %q: %w", serviceName, kubeContext, opts.serviceNamespace, err)
+	}
+
+	// Resolve defaults for the new service entry.
+	sni := opts.sni
+	if sni == "" {
+		sni = serviceName
+	}
+	localPort := opts.localPort
+	if localPort == 0 {
+		localPort = opts.port
 	}
 
 	// 5. Determine direction: expose in the opposite cluster.
@@ -99,8 +121,8 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 		component = "portal-initiator"
 	}
 
-	// 6. Build ClusterIP Service YAML.
-	svcYAML, err := buildExposeService(kubeContext, tunnel.Namespace, component, serviceName, opts.port, tunnel.TunnelPort)
+	// 6. Build ClusterIP Service YAML. For multi-service, targetPort is the localPort.
+	svcYAML, err := buildExposeService(kubeContext, tunnel.Namespace, component, serviceName, opts.port, localPort)
 	if err != nil {
 		return fmt.Errorf("failed to build service manifest: %w", err)
 	}
@@ -116,10 +138,24 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 	// 7. Update Envoy config if this is the natural tunnel direction.
 	if role == "destination" {
 		// Natural direction: destination service accessible from source.
-		// Update the responder's backend to route to the actual service.
+		// Build the new service entry.
+		newEntry := state.ServiceEntry{
+			Name:      serviceName,
+			Namespace: opts.serviceNamespace,
+			Port:      opts.port,
+			LocalPort: localPort,
+			SNI:       sni,
+			Direction: "destination",
+		}
+
+		// Gather all existing service entries and append the new one.
+		allEntries := tunnel.AllServiceEntries()
+		allEntries = append(allEntries, newEntry)
+
+		// Update both responder and initiator configs additively.
 		backendHost := fmt.Sprintf("%s.%s.svc", serviceName, opts.serviceNamespace)
-		if err := updateResponderConfig(ctx, tunnel, backendHost, opts.port); err != nil {
-			return fmt.Errorf("failed to update responder config: %w", err)
+		if err := updateTunnelConfigs(ctx, tunnel, allEntries, backendHost, opts.port); err != nil {
+			return fmt.Errorf("failed to update tunnel config: %w", err)
 		}
 		fmt.Fprintf(out, "\u2713 Updated responder Envoy config to route to %s:%d\n", backendHost, opts.port)
 	} else {
@@ -130,7 +166,7 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 		fmt.Fprintln(out, "will not be routed until reverse tunneling is configured.")
 	}
 
-	// 8. Update state with the new service entry.
+	// 8. Update state with the new service entry (both legacy and new fields).
 	sf, err := store.Load()
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to load tunnel state for update: %v\n", err)
@@ -138,6 +174,14 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 		for i := range sf.Tunnels {
 			if sf.Tunnels[i].Name == tunnel.Name {
 				sf.Tunnels[i].Services = append(sf.Tunnels[i].Services, entry)
+				sf.Tunnels[i].ServiceEntries = append(sf.Tunnels[i].ServiceEntries, state.ServiceEntry{
+					Name:      serviceName,
+					Namespace: opts.serviceNamespace,
+					Port:      opts.port,
+					LocalPort: localPort,
+					SNI:       sni,
+					Direction: role,
+				})
 				break
 			}
 		}
@@ -155,34 +199,80 @@ func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeO
 	return nil
 }
 
-// updateResponderConfig re-renders the responder bootstrap with the new backend
-// service, applies the updated ConfigMap, and restarts the responder deployment.
-func updateResponderConfig(ctx context.Context, tunnel *state.TunnelState, backendHost string, backendPort int) error {
-	// Re-render responder bootstrap with actual backend.
-	bootstrap, err := envoy.RenderResponderBootstrap(envoy.ResponderConfig{
-		ListenPort:  tunnel.TunnelPort,
-		BackendHost: backendHost,
-		BackendPort: backendPort,
+// updateTunnelConfigs re-renders both the responder and initiator bootstrap configs
+// with all service entries, applies the updated ConfigMaps, and restarts both deployments.
+func updateTunnelConfigs(ctx context.Context, tunnel *state.TunnelState, entries []state.ServiceEntry, _ string, _ int) error {
+	// Build responder multi-service config.
+	var routes []envoy.ServiceRoute
+	for _, e := range entries {
+		backendHost := fmt.Sprintf("%s.%s.svc", e.Name, e.Namespace)
+		if e.Namespace == "" {
+			backendHost = fmt.Sprintf("%s.default.svc", e.Name)
+		}
+		routes = append(routes, envoy.ServiceRoute{
+			SNI:         e.SNI,
+			BackendHost: backendHost,
+			BackendPort: e.Port,
+		})
+	}
+
+	responderBootstrap, err := envoy.RenderResponderMultiBootstrap(envoy.ResponderMultiServiceConfig{
+		ListenPort: tunnel.TunnelPort,
+		Services:   routes,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to render responder bootstrap: %w", err)
 	}
 
-	// Build ConfigMap YAML.
-	cmYAML, err := buildBootstrapConfigMap("portal-responder-bootstrap", tunnel.Namespace, bootstrap)
+	responderCM, err := buildBootstrapConfigMap("portal-responder-bootstrap", tunnel.Namespace, responderBootstrap)
 	if err != nil {
-		return fmt.Errorf("failed to build ConfigMap: %w", err)
+		return fmt.Errorf("failed to build responder ConfigMap: %w", err)
 	}
 
-	// Apply to destination cluster.
+	// Apply responder ConfigMap and restart.
 	destClient := newKubeClient(tunnel.DestinationContext, tunnel.Namespace)
-	if err := destClient.Apply(ctx, [][]byte{cmYAML}); err != nil {
-		return fmt.Errorf("failed to apply updated ConfigMap: %w", err)
+	if err := destClient.Apply(ctx, [][]byte{responderCM}); err != nil {
+		return fmt.Errorf("failed to apply updated responder ConfigMap: %w", err)
 	}
-
-	// Rollout restart the responder to pick up the new config.
 	if err := destClient.RolloutRestart(ctx, "portal-responder"); err != nil {
 		return fmt.Errorf("failed to restart responder: %w", err)
+	}
+
+	// Build initiator multi-service config.
+	var listeners []envoy.ServiceListener
+	for _, e := range entries {
+		lp := e.LocalPort
+		if lp == 0 {
+			lp = e.Port
+		}
+		listeners = append(listeners, envoy.ServiceListener{
+			Name:       e.Name,
+			ListenPort: lp,
+			SNI:        e.SNI,
+		})
+	}
+
+	initiatorBootstrap, err := envoy.RenderInitiatorMultiBootstrap(envoy.InitiatorMultiServiceConfig{
+		ResponderHost: "portal-responder." + tunnel.Namespace + ".svc",
+		ResponderPort: tunnel.TunnelPort,
+		Services:      listeners,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to render initiator bootstrap: %w", err)
+	}
+
+	initiatorCM, err := buildBootstrapConfigMap("portal-initiator-bootstrap", tunnel.Namespace, initiatorBootstrap)
+	if err != nil {
+		return fmt.Errorf("failed to build initiator ConfigMap: %w", err)
+	}
+
+	// Apply initiator ConfigMap and restart.
+	sourceClient := newKubeClient(tunnel.SourceContext, tunnel.Namespace)
+	if err := sourceClient.Apply(ctx, [][]byte{initiatorCM}); err != nil {
+		return fmt.Errorf("failed to apply updated initiator ConfigMap: %w", err)
+	}
+	if err := sourceClient.RolloutRestart(ctx, "portal-initiator"); err != nil {
+		return fmt.Errorf("failed to restart initiator: %w", err)
 	}
 
 	return nil
@@ -241,7 +331,7 @@ func joinNames(names []string) string {
 }
 
 // buildExposeService builds a ClusterIP Service YAML that routes to the Envoy proxy pod.
-func buildExposeService(ctxName, namespace, component, serviceName string, servicePort, tunnelPort int) ([]byte, error) {
+func buildExposeService(ctxName, namespace, component, serviceName string, servicePort, targetPort int) ([]byte, error) {
 	svc := map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -263,7 +353,7 @@ func buildExposeService(ctxName, namespace, component, serviceName string, servi
 				map[string]interface{}{
 					"name":       serviceName,
 					"port":       servicePort,
-					"targetPort": tunnelPort,
+					"targetPort": targetPort,
 					"protocol":   "TCP",
 				},
 			},

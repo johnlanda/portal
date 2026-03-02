@@ -94,10 +94,11 @@ kind delete cluster --name portal-dest
 ## Scope
 
 This document covers all packages in the repository:
+- `portal` (root) — Go library API for programmatic tunnel management
 - `cmd/portal` — CLI entrypoint
 - `internal/certs` — Certificate generation and rotation
 - `internal/cli` — Command implementations
-- `internal/envoy` — Envoy bootstrap configuration
+- `internal/envoy` — Envoy bootstrap configuration (single + multi-service)
 - `internal/kube` — Kubernetes client abstraction
 - `internal/manifest` — Manifest rendering and disk writer
 - `internal/state` — Tunnel state persistence
@@ -111,6 +112,13 @@ This document covers all packages in the repository:
 |------|-------|-------------|
 | `main.go` | 37 | Entrypoint; assembles root `cobra.Command`, registers subcommands, injects version via `-ldflags` |
 
+### Root Package
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `portal.go` | 84 | Go library API: `RenderTunnel`, `RenderTunnelWithServices`, `AddService`, `GenerateCertificates`; type aliases for public consumption |
+| `portal_test.go` | 129 | Library API tests: single-service, multi-service, add-service, cert generation, external certs |
+
 ### `internal/certs/`
 
 | File | Lines | Description |
@@ -122,30 +130,34 @@ This document covers all packages in the repository:
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `connect.go` | 316 | `portal connect` — two-phase deploy: render manifests, apply responder, discover LB, re-render initiator, apply, save state |
-| `connect_test.go` | 594 | Connect command tests: flag validation, dry-run, two-phase render, cert-dir, error paths |
+| `connect.go` | 356 | `portal connect` — two-phase deploy: render manifests, apply responder, discover LB, re-render initiator, apply, save state; multi-service + external cert support |
+| `connect_test.go` | 702 | Connect command tests: flag validation, dry-run, two-phase render, cert-dir, multi-service, error paths |
 | `disconnect.go` | 179 | `portal disconnect` — delete manifests from both clusters, remove state entry |
 | `disconnect_test.go` | 353 | Disconnect tests: cleanup verification, missing tunnel, namespace override |
 | `expose.go` | 296 | `portal expose` — add ClusterIP Service + Envoy route for a service through an existing tunnel |
 | `expose_test.go` | 583 | Expose tests: destination/source direction, tunnel selection, config update |
 | `format.go` | 36 | Shared output formatting helpers |
-| `generate.go` | 256 | `portal generate` — render manifests to disk for GitOps (Kustomize/ArgoCD/Flux) |
-| `generate_test.go` | 648 | Generate tests: output structure, cert-manager mode, custom flags, existing cert-dir |
+| `generate.go` | 272 | `portal generate` — render manifests to disk for GitOps; multi-service + external cert support |
+| `generate_test.go` | 708 | Generate tests: output structure, cert-manager mode, custom flags, existing cert-dir, multi-service |
 | `list.go` | 64 | `portal list` — display all known tunnels from state file |
 | `list_test.go` | 174 | List tests: JSON output, empty state, multiple tunnels |
 | `rotate_certs.go` | 56 | `portal rotate-certs` — re-issue leaf certs from persisted CA |
 | `rotate_certs_test.go` | 64 | Rotate-certs tests: validity override, missing tunnel dir |
-| `status.go` | 444 | `portal status` — show tunnel health: pod status, Envoy stats, connectivity |
-| `status_test.go` | 601 | Status tests: JSON output, pod phases, Envoy metrics parsing |
+| `service_flags.go` | 70 | Shared `parseServiceFlags()` helper for `--service` and `--service-local-port` CLI flags |
+| `service_flags_test.go` | 136 | Service flag parsing tests: formats, duplicates, local port overrides |
+| `status.go` | 585 | `portal status` — show tunnel health: pod status, Envoy stats, per-service cluster health |
+| `status_test.go` | 764 | Status tests: JSON output, pod phases, Envoy metrics parsing, per-service health |
 
 ### `internal/envoy/`
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `config.go` | 116 | Render initiator/responder bootstrap YAML from embedded Go templates |
-| `config_test.go` | 256 | Template rendering tests: port overrides, SNI, multi-backend |
-| `templates/initiator_tcp.yaml` | — | Envoy bootstrap: TCP proxy with client TLS, upstream proxy protocol, admin interface |
-| `templates/responder_tcp.yaml` | — | Envoy bootstrap: TCP proxy with server TLS, client cert validation, backend routing |
+| `config.go` | 230 | Render initiator/responder bootstrap YAML from embedded Go templates; single + multi-service configs |
+| `config_test.go` | 521 | Template rendering tests: port overrides, SNI, multi-service routing, multi-backend |
+| `templates/initiator_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with client TLS, upstream proxy protocol, admin interface |
+| `templates/responder_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with server TLS, client cert validation, backend routing |
+| `templates/initiator_multi_tcp.yaml` | — | Envoy bootstrap: multi-service initiator with N listeners, per-service SNI clusters |
+| `templates/responder_multi_tcp.yaml` | — | Envoy bootstrap: multi-service responder with `tls_inspector`, SNI-based filter chains |
 
 ### `internal/kube/`
 
@@ -165,8 +177,8 @@ This document covers all packages in the repository:
 |------|-------|-------------|
 | `certmanager.go` | 186 | Generate cert-manager CRDs: Issuer, Certificate for CA and leaf certs |
 | `certmanager_test.go` | 112 | Cert-manager manifest validation tests |
-| `render.go` | 734 | `Render()` — produces full `ManifestBundle` (Namespace, RBAC, ConfigMap, Secrets, Deployments, Services, NetworkPolicies, Kustomization) |
-| `render_test.go` | 933 | Render tests: default values, custom flags, cert-manager, hostname endpoint, service types |
+| `render.go` | 899 | `Render()` — produces full `ManifestBundle`; multi-service SNI routing, external cert support, split cert dirs |
+| `render_test.go` | 1156 | Render tests: default values, custom flags, cert-manager, multi-service, external certs, split cert dirs |
 | `rotate.go` | 138 | `RotateCertificates` — re-issue leaves from persisted CA, update secrets and metadata |
 | `rotate_test.go` | 199 | Rotation tests: leaf renewal, CA preservation, validity tracking |
 | `writer.go` | 106 | `WriteToDisk` — write `ManifestBundle` to `source/` + `destination/` directories with Kustomization files |
@@ -175,7 +187,7 @@ This document covers all packages in the repository:
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `state.go` | 203 | `Store` — thread-safe CRUD for `~/.portal/tunnels.json`; `TunnelState` and `StateFile` types |
+| `state.go` | 297 | `Store` — thread-safe CRUD for `~/.portal/tunnels.json`; `TunnelState`, `ServiceEntry`, dual-field backward compat |
 | `state_test.go` | 223 | State persistence tests: add, remove, list, concurrent access, exposed services |
 
 ### `test/e2e/`
@@ -196,21 +208,33 @@ This document covers all packages in the repository:
 
 | Type | File | Purpose |
 |------|------|---------|
+| `portal.TunnelConfig` | `portal.go` | Re-export of `manifest.TunnelConfig` for the public Go library API |
+| `portal.ServiceConfig` | `portal.go` | Re-export of `manifest.ServiceConfig` for the public Go library API |
+| `portal.ExternalCertificates` | `portal.go` | Re-export of `manifest.ExternalCertificates` for the public Go library API |
+| `portal.ManifestBundle` | `portal.go` | Re-export of `manifest.ManifestBundle` for the public Go library API |
+| `portal.TunnelCertificates` | `portal.go` | Re-export of `certs.TunnelCertificates` for the public Go library API |
 | `certs.TunnelCertificates` | `internal/certs/certs.go` | PEM-encoded CA + initiator client + responder server certs and keys |
-| `envoy.InitiatorConfig` | `internal/envoy/config.go` | Initiator Envoy bootstrap parameters (responder host/port, listen port, certs) |
-| `envoy.ResponderConfig` | `internal/envoy/config.go` | Responder Envoy bootstrap parameters (listen port, backend host/port, certs) |
+| `envoy.InitiatorConfig` | `internal/envoy/config.go` | Single-service initiator Envoy bootstrap parameters |
+| `envoy.ResponderConfig` | `internal/envoy/config.go` | Single-service responder Envoy bootstrap parameters |
+| `envoy.InitiatorMultiServiceConfig` | `internal/envoy/config.go` | Multi-service initiator: N local listeners, per-service SNI clusters |
+| `envoy.ResponderMultiServiceConfig` | `internal/envoy/config.go` | Multi-service responder: SNI-based routing via `tls_inspector` to N backends |
+| `envoy.ServiceRoute` | `internal/envoy/config.go` | Backend service routed by SNI on the responder |
+| `envoy.ServiceListener` | `internal/envoy/config.go` | Local listener on the initiator for a specific service |
 | `kube.Client` | `internal/kube/kube.go` | Interface: Apply, Delete, WaitForDeployment, WaitForServiceAddress, PortForward, GetPods, GetService, RolloutRestart |
 | `kube.CommandRunner` | `internal/kube/runner.go` | Interface: subprocess execution abstraction for testability |
 | `kube.PodInfo` | `internal/kube/types.go` | Pod summary: name, phase, ready, restarts, containers |
 | `kube.ServiceInfo` | `internal/kube/types.go` | Service summary: type, cluster IP, external IPs, ports, LB ingress |
 | `kube.PortForwardSession` | `internal/kube/types.go` | Active port-forward subprocess handle |
-| `manifest.TunnelConfig` | `internal/manifest/render.go` | All parameters for rendering a tunnel's manifests |
+| `manifest.TunnelConfig` | `internal/manifest/render.go` | All parameters for rendering a tunnel's manifests (incl. Services, ExternalCerts) |
+| `manifest.ServiceConfig` | `internal/manifest/render.go` | Service to route through the tunnel (SNI, backend host/port, local port) |
+| `manifest.ExternalCertificates` | `internal/manifest/render.go` | PEM-encoded cert material provided externally (skip auto-generation) |
 | `manifest.ManifestBundle` | `internal/manifest/render.go` | Complete set of rendered K8s manifests for source + destination clusters |
 | `manifest.Resource` | `internal/manifest/render.go` | Single K8s manifest (filename + YAML content) |
-| `manifest.TunnelMetadata` | `internal/manifest/render.go` | Tunnel info for `tunnel.yaml` (name, contexts, endpoint, cert validity, rotation) |
+| `manifest.TunnelMetadata` | `internal/manifest/render.go` | Tunnel info for `tunnel.yaml` (incl. service configuration) |
 | `manifest.RotateConfig` | `internal/manifest/rotate.go` | Parameters for certificate rotation |
 | `state.Store` | `internal/state/state.go` | Thread-safe CRUD for tunnel state file |
-| `state.TunnelState` | `internal/state/state.go` | Metadata for a single deployed tunnel |
+| `state.TunnelState` | `internal/state/state.go` | Metadata for a single deployed tunnel (incl. ServiceEntries) |
+| `state.ServiceEntry` | `internal/state/state.go` | Service routed through a tunnel (name, namespace, port, local port, SNI, direction) |
 | `state.StateFile` | `internal/state/state.go` | Root structure for `~/.portal/tunnels.json` |
 
 ## Data Flow
@@ -218,16 +242,24 @@ This document covers all packages in the repository:
 ### `portal connect` (imperative deploy)
 
 ```
-CLI args + flags
+CLI args + flags (incl. --service, --service-local-port, cert flags)
     │
     ▼
 Validate prerequisites (kubectl, kube contexts)
     │
     ▼
-certs.Generate() ──► TunnelCertificates (CA + leaves)
+parseServiceFlags() ──► []ServiceConfig (if --service provided)
     │
     ▼
-manifest.Render(TunnelConfig) ──► ManifestBundle
+Resolve certificates:
+    ExternalCerts? → use PEM bytes
+    --initiator-cert-dir + --responder-cert-dir? → loadCertsFromDir()
+    --cert-dir? → loadCertsFromDir() (shared)
+    Otherwise → certs.Generate() ──► TunnelCertificates
+    │
+    ▼
+manifest.Render(TunnelConfig{Services: ...}) ──► ManifestBundle
+    │   (multi-service: SNI routing templates; single: backward-compatible)
     │                               ├── Source resources (initiator)
     │                               └── Destination resources (responder)
     ▼
@@ -243,7 +275,7 @@ manifest.Render() (re-render with real endpoint) ──► Updated initiator man
 kube.Client.Apply() ── source context ──► Deploy initiator
     │
     ▼
-state.Store.Add() ──► Persist tunnel to ~/.portal/tunnels.json
+state.Store.Add() ──► Persist tunnel + ServiceEntries to ~/.portal/tunnels.json
 ```
 
 ### `portal generate` (GitOps)
@@ -275,16 +307,19 @@ manifest.WriteToDisk() ──► Output directory:
 ### `portal expose`
 
 ```
-CLI args (context, service, --port)
+CLI args (context, service, --port, --local-port, --sni)
     │
     ▼
 state.Store.Find() ──► Look up tunnel by context
     │
     ▼
-Parse existing responder ConfigMap ──► Current Envoy bootstrap
+Load existing ServiceEntries from state ──► All previously exposed services
     │
     ▼
-envoy.RenderResponder() ──► Updated bootstrap with new backend cluster
+Append new ServiceEntry ──► Merged service list
+    │
+    ▼
+envoy.RenderResponderMultiBootstrap() ──► Updated bootstrap with all service routes
     │
     ▼
 kube.Client.Apply() ── destination ──► Updated ConfigMap + new ClusterIP Service
@@ -293,10 +328,16 @@ kube.Client.Apply() ── destination ──► Updated ConfigMap + new Cluster
 kube.Client.RolloutRestart() ──► Restart responder to pick up config
     │
     ▼
-kube.Client.Apply() ── source ──► ClusterIP Service pointing to initiator
+envoy.RenderInitiatorMultiBootstrap() ──► Updated initiator bootstrap with new listener
     │
     ▼
-state.Store.Update() ──► Record exposed service
+kube.Client.Apply() ── source ──► Updated ConfigMap + ClusterIP Service
+    │
+    ▼
+kube.Client.RolloutRestart() ──► Restart initiator to pick up config
+    │
+    ▼
+state.Store.Update() ──► Record exposed service as ServiceEntry
 ```
 
 ## Change Patterns
@@ -321,8 +362,10 @@ state.Store.Update() ──► Record exposed service
 
 ### Add a New Envoy Feature (Listener, Filter, Cluster)
 
-1. Edit the relevant template in `internal/envoy/templates/` (`initiator_tcp.yaml` or `responder_tcp.yaml`)
-2. If the feature requires new parameters, add fields to `InitiatorConfig` or `ResponderConfig` in `internal/envoy/config.go`
+1. Edit the relevant template in `internal/envoy/templates/`:
+   - Single-service: `initiator_tcp.yaml` or `responder_tcp.yaml`
+   - Multi-service: `initiator_multi_tcp.yaml` or `responder_multi_tcp.yaml`
+2. If the feature requires new parameters, add fields to the relevant config type in `internal/envoy/config.go` (`InitiatorConfig`, `ResponderConfig`, `InitiatorMultiServiceConfig`, `ResponderMultiServiceConfig`)
 3. Update `internal/envoy/config_test.go` to verify the rendered output
 4. If the feature is configurable via CLI flags, thread the flag through `internal/cli/` → `manifest.TunnelConfig` → `envoy.XxxConfig`
 5. Run `go test ./internal/envoy/ ./internal/manifest/ ./internal/cli/`
@@ -355,9 +398,13 @@ portal (cmd/portal/main.go)
 │   ├── --cert-validity (default: 8760h)
 │   ├── --cert-dir
 │   ├── --cert-manager
+│   ├── --initiator-cert-dir
+│   ├── --responder-cert-dir
 │   ├── --envoy-image (default: envoyproxy/envoy:v1.37-latest@sha256:...)
 │   ├── --envoy-log-level (default: info)
-│   └── --service-type (default: LoadBalancer)
+│   ├── --service-type (default: LoadBalancer)
+│   ├── --service (repeatable: sni=host:port)
+│   └── --service-local-port (repeatable: sni=port)
 ├── connect <source_ctx> <dest_ctx>
 │   ├── (all generate flags)
 │   ├── --deploy-timeout (default: 5m)
@@ -368,6 +415,8 @@ portal (cmd/portal/main.go)
 │   └── --delete-timeout (default: 2m)
 ├── expose <context> <service>
 │   ├── --port (required)
+│   ├── --local-port
+│   ├── --sni
 │   ├── --service-namespace (default: default)
 │   └── --tunnel
 ├── status [<source_ctx> <dest_ctx>]
@@ -384,8 +433,9 @@ portal (cmd/portal/main.go)
 
 | Package | Test Files |
 |---------|-----------|
+| Root (`portal`) | `portal_test.go` |
 | `internal/certs` | `certs_test.go` |
-| `internal/cli` | `connect_test.go`, `disconnect_test.go`, `expose_test.go`, `generate_test.go`, `list_test.go`, `rotate_certs_test.go`, `status_test.go` |
+| `internal/cli` | `connect_test.go`, `disconnect_test.go`, `expose_test.go`, `generate_test.go`, `list_test.go`, `rotate_certs_test.go`, `service_flags_test.go`, `status_test.go` |
 | `internal/envoy` | `config_test.go` |
 | `internal/kube` | `kube_test.go`, `kubectl_test.go` |
 | `internal/manifest` | `certmanager_test.go`, `render_test.go`, `rotate_test.go` |

@@ -916,6 +916,229 @@ func TestGitignoreContent(t *testing.T) {
 	}
 }
 
+func TestRenderMultiService(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		Services: []ServiceConfig{
+			{SNI: "backend", BackendHost: "backend-svc.synapse.svc", BackendPort: 8443, LocalPort: 18443},
+			{SNI: "otel", BackendHost: "otel-collector.synapse.svc", BackendPort: 4317},
+		},
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	// Verify multi-service bootstrap (responder should have tls_inspector).
+	responderCM := findResource(bundle.Destination, "portal-responder-bootstrap-cm.yaml")
+	if responderCM == nil {
+		t.Fatal("portal-responder-bootstrap-cm.yaml not found")
+	}
+	responderContent := string(responderCM.Content)
+	if !strings.Contains(responderContent, "tls_inspector") {
+		t.Error("responder bootstrap should contain tls_inspector for multi-service")
+	}
+	if !strings.Contains(responderContent, "backend") {
+		t.Error("responder bootstrap should reference 'backend' service")
+	}
+	if !strings.Contains(responderContent, "otel") {
+		t.Error("responder bootstrap should reference 'otel' service")
+	}
+
+	// Verify initiator bootstrap has per-service listeners.
+	initiatorCM := findResource(bundle.Source, "portal-initiator-bootstrap-cm.yaml")
+	if initiatorCM == nil {
+		t.Fatal("portal-initiator-bootstrap-cm.yaml not found")
+	}
+	initiatorContent := string(initiatorCM.Content)
+	if !strings.Contains(initiatorContent, "18443") {
+		t.Error("initiator bootstrap should contain custom local port 18443 for backend")
+	}
+	if !strings.Contains(initiatorContent, "4317") {
+		t.Error("initiator bootstrap should contain port 4317 for otel")
+	}
+
+	// Verify initiator deployment has per-service container ports.
+	initDep := findResource(bundle.Source, "portal-initiator-deployment.yaml")
+	if initDep == nil {
+		t.Fatal("portal-initiator-deployment.yaml not found")
+	}
+	depContent := string(initDep.Content)
+	if !strings.Contains(depContent, "svc-backend") {
+		t.Error("initiator deployment should have container port named svc-backend")
+	}
+	if !strings.Contains(depContent, "svc-otel") {
+		t.Error("initiator deployment should have container port named svc-otel")
+	}
+
+	// Verify initiator NetworkPolicy allows per-service ports.
+	initNP := findResource(bundle.Source, "portal-initiator-networkpolicy.yaml")
+	if initNP == nil {
+		t.Fatal("portal-initiator-networkpolicy.yaml not found")
+	}
+	npContent := string(initNP.Content)
+	if !strings.Contains(npContent, "18443") {
+		t.Error("initiator NetworkPolicy should allow port 18443")
+	}
+	if !strings.Contains(npContent, "4317") {
+		t.Error("initiator NetworkPolicy should allow port 4317")
+	}
+
+	// Verify metadata includes services.
+	if len(bundle.Metadata.Services) != 2 {
+		t.Errorf("Metadata.Services has %d entries, want 2", len(bundle.Metadata.Services))
+	}
+
+	// Verify all resources are valid YAML.
+	for _, r := range append(bundle.Source, bundle.Destination...) {
+		var parsed map[string]interface{}
+		if err := yaml.Unmarshal(r.Content, &parsed); err != nil {
+			t.Errorf("%s is not valid YAML: %v", r.Filename, err)
+		}
+	}
+}
+
+func TestRenderWithExternalCerts(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		ExternalCerts: &ExternalCertificates{
+			CACert:        []byte("fake-ca-cert"),
+			InitiatorCert: []byte("fake-init-cert"),
+			InitiatorKey:  []byte("fake-init-key"),
+			ResponderCert: []byte("fake-resp-cert"),
+			ResponderKey:  []byte("fake-resp-key"),
+		},
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	// Certs should be nil (not generated).
+	if bundle.Certs != nil {
+		t.Error("Certs should be nil when using external certificates")
+	}
+
+	// Source should have a secret with the external initiator cert.
+	srcSecret := findResource(bundle.Source, "portal-tunnel-tls-secret.yaml")
+	if srcSecret == nil {
+		t.Fatal("source secret not found")
+	}
+
+	// Destination should have a secret with the external responder cert.
+	dstSecret := findResource(bundle.Destination, "portal-tunnel-tls-secret.yaml")
+	if dstSecret == nil {
+		t.Fatal("destination secret not found")
+	}
+}
+
+func TestRenderWithSplitCertDirs(t *testing.T) {
+	// Create temp cert directories with test files.
+	initDir := filepath.Join(t.TempDir(), "initiator")
+	respDir := filepath.Join(t.TempDir(), "responder")
+	if err := os.MkdirAll(initDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(respDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write test cert files.
+	for _, dir := range []string{initDir, respDir} {
+		if err := os.WriteFile(filepath.Join(dir, "tls.crt"), []byte("cert-data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "tls.key"), []byte("key-data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "ca.crt"), []byte("ca-data"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		InitiatorCertDir:   initDir,
+		ResponderCertDir:   respDir,
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	// Should not generate certs.
+	if bundle.Certs != nil {
+		t.Error("Certs should be nil when using cert directories")
+	}
+
+	// Both sides should have secrets.
+	assertResourceExists(t, bundle.Source, "portal-tunnel-tls-secret.yaml")
+	assertResourceExists(t, bundle.Destination, "portal-tunnel-tls-secret.yaml")
+}
+
+func TestRenderWithSplitCertDirsMissingOne(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		InitiatorCertDir:   "/some/path",
+		// ResponderCertDir intentionally missing
+	}
+
+	_, err := Render(cfg)
+	if err == nil {
+		t.Fatal("expected error when only one cert dir is specified")
+	}
+	if !strings.Contains(err.Error(), "both") {
+		t.Errorf("error should mention 'both', got: %v", err)
+	}
+}
+
+func TestRenderWithSharedCertDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tls.crt"), []byte("cert"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tls.key"), []byte("key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), []byte("ca"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		CertDir:            dir,
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	if bundle.Certs != nil {
+		t.Error("Certs should be nil when using CertDir")
+	}
+	assertResourceExists(t, bundle.Source, "portal-tunnel-tls-secret.yaml")
+	assertResourceExists(t, bundle.Destination, "portal-tunnel-tls-secret.yaml")
+}
+
 func assertResourceExists(t *testing.T, resources []Resource, filename string) {
 	t.Helper()
 	if findResource(resources, filename) == nil {

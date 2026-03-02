@@ -181,19 +181,22 @@ func TestExposeFromDestinationContext(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// ClusterIP Service should be created in source (src-cluster): 1 Apply call.
-	if srcMock.applyCalls != 1 {
-		t.Errorf("source Apply calls = %d, want 1", srcMock.applyCalls)
+	// ClusterIP Service is applied in source (src-cluster) + initiator ConfigMap update.
+	if srcMock.applyCalls != 2 {
+		t.Errorf("source Apply calls = %d, want 2 (ClusterIP + initiator ConfigMap)", srcMock.applyCalls)
 	}
 
-	// Destination-to-source is the natural direction: config update happens in destination.
-	// updateResponderConfig creates its own client for dst-cluster → dstMock.
-	// It calls Apply (ConfigMap) + RolloutRestart.
+	// Destination gets responder ConfigMap update.
+	// updateTunnelConfigs updates responder ConfigMap.
 	if dstMock.applyCalls != 1 {
-		t.Errorf("destination Apply calls = %d, want 1 (ConfigMap update)", dstMock.applyCalls)
+		t.Errorf("destination Apply calls = %d, want 1 (responder ConfigMap update)", dstMock.applyCalls)
 	}
+	// Both sides should be restarted.
 	if dstMock.rolloutRestartCalls != 1 {
 		t.Errorf("destination rolloutRestartCalls = %d, want 1", dstMock.rolloutRestartCalls)
+	}
+	if srcMock.rolloutRestartCalls != 1 {
+		t.Errorf("source rolloutRestartCalls = %d, want 1 (initiator restart)", srcMock.rolloutRestartCalls)
 	}
 
 	output := buf.String()
@@ -365,8 +368,8 @@ func TestExposeAppliedYAMLContent(t *testing.T) {
 	if portVal, ok := port["port"].(int); !ok || portVal != 8080 {
 		t.Errorf("port.port = %v, want 8080", port["port"])
 	}
-	if targetPort, ok := port["targetPort"].(int); !ok || targetPort != 10443 {
-		t.Errorf("port.targetPort = %v, want 10443", port["targetPort"])
+	if targetPort, ok := port["targetPort"].(int); !ok || targetPort != 8080 {
+		t.Errorf("port.targetPort = %v, want 8080 (defaults to service port)", port["targetPort"])
 	}
 }
 
@@ -425,12 +428,19 @@ func TestExposeConfigMapUpdate(t *testing.T) {
 		t.Fatal("data.envoy.yaml is not a string")
 	}
 
-	// Verify the bootstrap references the service backend.
+	// Verify the bootstrap references the service backend (multi-service format).
 	if !strings.Contains(envoyYAML, "my-api.apps.svc") {
 		t.Errorf("bootstrap should contain service FQDN 'my-api.apps.svc', got:\n%s", envoyYAML)
 	}
 	if !strings.Contains(envoyYAML, "port_value: 8080") {
 		t.Errorf("bootstrap should contain 'port_value: 8080', got:\n%s", envoyYAML)
+	}
+	// Multi-service template should have tls_inspector and SNI routing.
+	if !strings.Contains(envoyYAML, "tls_inspector") {
+		t.Errorf("bootstrap should contain tls_inspector for multi-service, got:\n%s", envoyYAML)
+	}
+	if !strings.Contains(envoyYAML, "my-api") {
+		t.Errorf("bootstrap should contain SNI 'my-api', got:\n%s", envoyYAML)
 	}
 }
 

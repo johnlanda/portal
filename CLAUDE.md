@@ -13,16 +13,19 @@ Portal is a CLI tool that creates secure, multiplexed Envoy reverse tunnels betw
 
 ```
 portal/
+├── portal.go                   # Go library API (RenderTunnel, RenderTunnelWithServices, AddService, GenerateCertificates)
+├── portal_test.go              # Library API tests
 ├── cmd/portal/
 │   └── main.go                 # CLI entrypoint — assembles root cobra.Command
 ├── internal/
 │   ├── certs/                  # mTLS certificate generation and rotation (RSA 4096)
 │   ├── cli/                    # Command implementations (connect, generate, expose, etc.)
+│   │   └── service_flags.go    # Shared --service / --service-local-port flag parser
 │   ├── envoy/                  # Envoy bootstrap config rendering
-│   │   └── templates/          # Go-embedded YAML templates (initiator_tcp, responder_tcp)
+│   │   └── templates/          # Go-embedded YAML templates (single + multi-service SNI routing)
 │   ├── kube/                   # kubectl-based Kubernetes client abstraction
-│   ├── manifest/               # K8s manifest rendering, disk writer, cert-manager CRDs
-│   └── state/                  # Persistent tunnel state (~/.portal/tunnels.json)
+│   ├── manifest/               # K8s manifest rendering, disk writer, cert-manager CRDs, external cert support
+│   └── state/                  # Persistent tunnel state (~/.portal/tunnels.json) with ServiceEntry model
 ├── test/e2e/                   # E2E tests (build tag: e2e) — KIND + MetalLB
 ├── docs/                       # PRD, demo guide, logo
 ├── go.mod
@@ -60,12 +63,13 @@ Supports both built-in PKI (`internal/certs`) and cert-manager integration (`--c
 
 | Package | Responsibility |
 |---------|---------------|
+| `portal` (root) | Go library API: `RenderTunnel`, `RenderTunnelWithServices`, `AddService`, `GenerateCertificates` |
 | `certs` | Generate per-tunnel CA + leaf certificates; rotate leaves from persisted CA |
-| `cli` | Cobra command implementations; orchestrate render → apply → state-update |
-| `envoy` | Render Envoy bootstrap YAML from Go templates (initiator + responder) |
+| `cli` | Cobra command implementations; orchestrate render → apply → state-update; multi-service flag parsing |
+| `envoy` | Render Envoy bootstrap YAML from Go templates (single-service + multi-service SNI routing) |
 | `kube` | Shell out to `kubectl` for apply/delete/wait/port-forward; `CommandRunner` interface for testing |
-| `manifest` | Render full K8s manifest bundles (Deployments, Services, Secrets, NetworkPolicies, Kustomization); cert-manager CRDs; disk writer |
-| `state` | Thread-safe CRUD for `~/.portal/tunnels.json`; track deployed tunnels and exposed services |
+| `manifest` | Render full K8s manifest bundles; multi-service support; external cert loading; cert-manager CRDs; disk writer |
+| `state` | Thread-safe CRUD for `~/.portal/tunnels.json`; track tunnels, services (`ServiceEntry`), backward-compat migration |
 
 ## Development Conventions
 

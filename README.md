@@ -67,6 +67,47 @@ flowchart LR
 - **TLS 1.3 enforced**: Both sides require TLS 1.3 as the minimum protocol
   version.
 
+### Multi-Service Tunnels
+
+A single tunnel can multiplex multiple services using SNI-based routing. Each
+service gets its own listener port on the initiator and its own filter chain on
+the responder:
+
+```mermaid
+flowchart LR
+    subgraph source["Source Cluster"]
+        app1["App (port 8443)"]
+        app2["App (port 4317)"]
+        initiator["portal-initiator\n(Envoy)\nlistener:8443 → SNI:backend\nlistener:4317 → SNI:otel"]
+        app1 --> initiator
+        app2 --> initiator
+    end
+
+    subgraph dest["Destination Cluster"]
+        responder["portal-responder\n(Envoy, tls_inspector)\nSNI:backend → backend-svc:8443\nSNI:otel → otel-collector:4317"]
+        svc1["backend-svc:8443"]
+        svc2["otel-collector:4317"]
+        responder --> svc1
+        responder --> svc2
+    end
+
+    initiator -- "mTLS / HTTP/2\nSNI routing" --> responder
+
+    style source fill:#f0f4ff,stroke:#4a7fff,color:#000
+    style dest fill:#fff4f0,stroke:#e17b31,color:#000
+    style initiator fill:#2ba8d3,stroke:#1a7a9e,color:#fff
+    style responder fill:#e17b31,stroke:#b35e1f,color:#fff
+    style app1 fill:#fff,stroke:#999,color:#000
+    style app2 fill:#fff,stroke:#999,color:#000
+    style svc1 fill:#fff,stroke:#999,color:#000
+    style svc2 fill:#fff,stroke:#999,color:#000
+```
+
+The responder uses Envoy's `tls_inspector` listener filter to read the SNI from
+the TLS ClientHello without terminating TLS, then routes to the correct backend
+via `filter_chain_match.server_names`. Each service gets a dedicated Envoy
+cluster on the responder side.
+
 ## Installation
 
 ### From Source
@@ -101,6 +142,16 @@ generates certificates, and applies manifests to both sides:
 portal connect kind-source kind-destination
 ```
 
+Deploy a multi-service tunnel that routes multiple backends over a single
+connection:
+
+```bash
+portal connect source-ctx dest-ctx \
+  --service backend=backend-svc.ns.svc:8443 \
+  --service otel=otel-collector.ns.svc:4317 \
+  --service-local-port backend=18443
+```
+
 When you are done:
 
 ```bash
@@ -115,6 +166,16 @@ Generate manifests to disk for use with Kustomize, Argo CD, or Flux:
 portal generate source-ctx destination-ctx \
   --responder-endpoint "34.120.1.50:10443" \
   --output-dir ./tunnel-manifests
+```
+
+Multi-service works with `generate` too:
+
+```bash
+portal generate source-ctx dest-ctx \
+  --responder-endpoint "34.120.1.50:10443" \
+  --output-dir ./tunnel-manifests \
+  --service backend=backend-svc.ns.svc:8443 \
+  --service otel=otel-collector.ns.svc:4317
 ```
 
 Apply with kubectl or your GitOps controller:
@@ -148,8 +209,13 @@ Flags:
   --tunnel-port          Responder listen port (default: 10443)
   --cert-validity        Certificate validity duration (default: 8760h)
   --cert-manager         Use cert-manager CRDs instead of raw Secrets
+  --cert-dir             Use existing certs from a shared directory
+  --initiator-cert-dir   Use existing certs for initiator from this directory
+  --responder-cert-dir   Use existing certs for responder from this directory
   --envoy-image          Envoy proxy image (default: envoyproxy/envoy:v1.37-latest, pinned by digest)
   --service-type         Responder Service type: LoadBalancer, NodePort, ClusterIP (default: LoadBalancer)
+  --service              Service to route: sni=host:port (repeatable)
+  --service-local-port   Override initiator listener port: sni=port (repeatable)
   --deploy-timeout       Timeout waiting for deployment readiness (default: 5m)
   --lb-timeout           Timeout waiting for LoadBalancer address (default: 5m)
   --dry-run              Print rendered manifests without applying
@@ -167,7 +233,11 @@ portal generate <source_context> <destination_context> [flags]
 Flags:
   --output-dir           Directory to write manifests (required)
   --responder-endpoint   Responder address (required)
-  (plus all flags from connect except deploy-timeout, lb-timeout, dry-run)
+  --service              Service to route: sni=host:port (repeatable)
+  --service-local-port   Override initiator listener port: sni=port (repeatable)
+  --initiator-cert-dir   Use existing certs for initiator from this directory
+  --responder-cert-dir   Use existing certs for responder from this directory
+  (plus all shared flags from connect except deploy-timeout, lb-timeout, dry-run)
 ```
 
 Output structure:
@@ -198,13 +268,16 @@ portal expose <context> <service> --port <port> [flags]
 
 Flags:
   --port                 Port the service listens on (required)
+  --local-port           Initiator listener port (default: same as --port)
+  --sni                  Custom SNI value (default: service name)
   --service-namespace    Namespace of the service (default: default)
   --tunnel               Tunnel name (required if context matches multiple tunnels)
 ```
 
-Creates a ClusterIP Service in the opposite cluster and, for the natural tunnel
-direction (destination services), updates the responder Envoy config and
-restarts the pod.
+Creates a ClusterIP Service in the opposite cluster and updates both the
+responder and initiator Envoy configs with the new service route. Expose is
+additive -- calling it multiple times adds services to the existing tunnel
+without disrupting already-routed services.
 
 ### portal rotate-certs
 
@@ -233,8 +306,16 @@ portal status [<source_context> <destination_context>] [--json]
 ```
 
 With no arguments, shows a summary of all tunnels. With two arguments, shows
-detailed status including pod health and Envoy connection metrics (active
-connections, bytes sent/received, TLS handshakes).
+detailed status including pod health, Envoy connection metrics (active
+connections, bytes sent/received, TLS handshakes), and per-service health
+derived from Envoy cluster stats:
+
+```
+Tunnel: dp1--mgmt (Connected)
+  Services:
+    backend (SNI: backend)  -> backend-svc:8443  healthy
+    otel    (SNI: otel)     -> otel-collector:4317  healthy
+```
 
 ### portal list
 
@@ -267,6 +348,26 @@ CRDs instead of raw Kubernetes Secrets. cert-manager handles automatic renewal.
 ```bash
 portal connect source dest --cert-manager
 ```
+
+### External Certificates
+
+Bring your own certificates using split cert directories. Each directory must
+contain `tls.crt`, `tls.key`, and `ca.crt`:
+
+```bash
+portal connect source dest \
+  --initiator-cert-dir ./certs/initiator \
+  --responder-cert-dir ./certs/responder
+```
+
+Or use a shared directory when both sides use the same cert material:
+
+```bash
+portal connect source dest --cert-dir ./certs/shared
+```
+
+When using the Go library API, certificates can be provided as PEM bytes via
+the `ExternalCertificates` struct (see Go Library section below).
 
 ## Generated Kubernetes Resources
 
@@ -321,20 +422,73 @@ For GitOps workflows (`portal generate`), all state lives in the output
 directory and the file can be committed to version control (except the `ca/`
 directory, which is git-ignored by default).
 
+## Go Library API
+
+Portal can be used as a Go library (`import "github.com/tetratelabs/portal"`)
+for programmatic tunnel management. This is how Synapse integrates Portal into
+its Helm-based deployment workflow.
+
+```go
+import "github.com/tetratelabs/portal"
+
+// Single-service tunnel
+bundle, err := portal.RenderTunnel(portal.TunnelConfig{
+    SourceContext:      "dp-cluster",
+    DestinationContext: "mgmt-cluster",
+    ResponderEndpoint:  "tunnel.example.com:10443",
+})
+
+// Multi-service tunnel
+bundle, err := portal.RenderTunnelWithServices(portal.TunnelConfig{
+    SourceContext:      "dp-cluster",
+    DestinationContext: "mgmt-cluster",
+    ResponderEndpoint:  "tunnel.example.com:10443",
+}, []portal.ServiceConfig{
+    {SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+    {SNI: "otel", BackendHost: "otel-collector.ns.svc", BackendPort: 4317},
+})
+
+// Add a service to an existing tunnel
+bundle, err := portal.AddService(cfg, existingServices, portal.ServiceConfig{
+    SNI: "metrics", BackendHost: "metrics.ns.svc", BackendPort: 9090,
+})
+
+// Generate certificates separately
+certs, err := portal.GenerateCertificates("my-tunnel", []string{"10.0.0.1"}, 24*time.Hour)
+
+// Provide external certificates (skip auto-generation)
+bundle, err := portal.RenderTunnel(portal.TunnelConfig{
+    // ...
+    ExternalCerts: &portal.ExternalCertificates{
+        CACert:        caCertPEM,
+        InitiatorCert: initCertPEM,
+        InitiatorKey:  initKeyPEM,
+        ResponderCert: respCertPEM,
+        ResponderKey:  respKeyPEM,
+    },
+})
+```
+
+The returned `ManifestBundle` contains `Source` and `Destination` resource
+slices (each with `Filename` and `Content` fields) plus a `Metadata` struct
+with tunnel information including the service configuration.
+
 ## Project Layout
 
 ```
-cmd/portal/          CLI entrypoint
+portal.go              Go library API (RenderTunnel, RenderTunnelWithServices, AddService, GenerateCertificates)
+cmd/portal/            CLI entrypoint
 internal/
-  cli/               Command implementations (connect, disconnect, expose, etc.)
-  manifest/          Kubernetes manifest rendering and disk I/O
-  envoy/             Envoy bootstrap configuration templates
-  certs/             mTLS certificate generation and rotation
-  kube/              Kubernetes client abstraction (kubectl wrapper)
-  state/             Local tunnel state persistence (~/.portal/tunnels.json)
+  cli/                 Command implementations (connect, disconnect, expose, etc.)
+  manifest/            Kubernetes manifest rendering and disk I/O
+  envoy/               Envoy bootstrap configuration templates
+    templates/         Single-service + multi-service (SNI-routing) Envoy YAML templates
+  certs/               mTLS certificate generation and rotation
+  kube/                Kubernetes client abstraction (kubectl wrapper)
+  state/               Local tunnel state persistence (~/.portal/tunnels.json)
 docs/
-  demo/              Demo walkthrough, scripts, and patches
-  PRD.md             Product requirements document
+  demo/                Demo walkthrough, scripts, and patches
+  PRD.md               Product requirements document
 ```
 
 ## Security

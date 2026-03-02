@@ -594,3 +594,109 @@ func TestConnectInvalidContext(t *testing.T) {
 		t.Errorf("error should mention 'not found in kubeconfig', got: %v", err)
 	}
 }
+
+func TestConnectWithServices(t *testing.T) {
+	_, _, _ = setupTestHooks(t)
+
+	var buf strings.Builder
+	cmd := NewConnectCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--service", "backend=backend-svc.synapse.svc:8443",
+		"--service", "otel=otel-collector.synapse.svc:4317",
+		"--service-local-port", "backend=18443",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Tunnel established") {
+		t.Errorf("output should contain 'Tunnel established', got:\n%s", output)
+	}
+}
+
+func TestConnectWithServicesSavesState(t *testing.T) {
+	_, _, storePath := setupTestHooks(t)
+
+	var buf strings.Builder
+	cmd := NewConnectCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--service", "backend=backend-svc.synapse.svc:8443",
+		"--service", "otel=otel-collector.synapse.svc:4317",
+		"--service-local-port", "backend=18443",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify state includes service entries.
+	store := state.NewStore(storePath)
+	tunnels, err := store.List()
+	if err != nil {
+		t.Fatalf("failed to load state: %v", err)
+	}
+	if len(tunnels) != 1 {
+		t.Fatalf("expected 1 tunnel, got %d", len(tunnels))
+	}
+	ts := tunnels[0]
+	if len(ts.ServiceEntries) != 2 {
+		t.Fatalf("expected 2 service entries, got %d", len(ts.ServiceEntries))
+	}
+	if ts.ServiceEntries[0].Name != "backend" {
+		t.Errorf("ServiceEntries[0].Name = %q, want %q", ts.ServiceEntries[0].Name, "backend")
+	}
+	if ts.ServiceEntries[0].LocalPort != 18443 {
+		t.Errorf("ServiceEntries[0].LocalPort = %d, want %d", ts.ServiceEntries[0].LocalPort, 18443)
+	}
+	if ts.ServiceEntries[1].Name != "otel" {
+		t.Errorf("ServiceEntries[1].Name = %q, want %q", ts.ServiceEntries[1].Name, "otel")
+	}
+	if len(ts.Services) != 2 {
+		t.Errorf("expected 2 legacy services, got %d", len(ts.Services))
+	}
+}
+
+func TestConnectWithServicesDryRun(t *testing.T) {
+	_, _, _ = setupTestHooks(t)
+
+	var buf strings.Builder
+	cmd := NewConnectCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--service", "backend=backend-svc.synapse.svc:8443",
+		"--service", "otel=otel-collector.synapse.svc:4317",
+		"--dry-run",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	// Multi-service mode should produce SNI-based config.
+	if !strings.Contains(output, "tls_inspector") {
+		t.Error("dry-run output should contain tls_inspector for multi-service")
+	}
+	if !strings.Contains(output, "backend") {
+		t.Error("dry-run output should reference 'backend' service")
+	}
+	if !strings.Contains(output, "otel") {
+		t.Error("dry-run output should reference 'otel' service")
+	}
+}

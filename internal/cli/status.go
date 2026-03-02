@@ -53,16 +53,27 @@ pod health, restart counts, and service endpoints.`,
 
 // tunnelStatus holds the computed status for a single tunnel.
 type tunnelStatus struct {
-	Name               string     `json:"name"`
-	SourceContext      string     `json:"source_context"`
-	DestinationContext string     `json:"destination_context"`
-	Namespace          string     `json:"namespace"`
-	TunnelPort         int        `json:"tunnel_port"`
-	Status             string     `json:"status"`
-	Initiator          *podStatus `json:"initiator,omitempty"`
-	Responder          *podStatus `json:"responder,omitempty"`
-	ResponderEndpoint  string     `json:"responder_endpoint,omitempty"`
-	Error              string     `json:"error,omitempty"`
+	Name               string          `json:"name"`
+	SourceContext      string          `json:"source_context"`
+	DestinationContext string          `json:"destination_context"`
+	Namespace          string          `json:"namespace"`
+	TunnelPort         int             `json:"tunnel_port"`
+	Status             string          `json:"status"`
+	Initiator          *podStatus      `json:"initiator,omitempty"`
+	Responder          *podStatus      `json:"responder,omitempty"`
+	ResponderEndpoint  string          `json:"responder_endpoint,omitempty"`
+	Services           []serviceHealth `json:"services,omitempty"`
+	Error              string          `json:"error,omitempty"`
+}
+
+// serviceHealth reports the health of a single service routed through the tunnel.
+type serviceHealth struct {
+	Name      string `json:"name"`
+	SNI       string `json:"sni"`
+	Port      int    `json:"port"`
+	LocalPort int    `json:"local_port,omitempty"`
+	Direction string `json:"direction,omitempty"`
+	Healthy   *bool  `json:"healthy,omitempty"`
 }
 
 type podStatus struct {
@@ -208,6 +219,18 @@ func queryTunnelStatus(ts state.TunnelState) tunnelStatus {
 		}
 	}
 
+	// Populate per-service health from state.
+	for _, se := range ts.AllServiceEntries() {
+		sh := serviceHealth{
+			Name:      se.Name,
+			SNI:       se.SNI,
+			Port:      se.Port,
+			LocalPort: se.LocalPort,
+			Direction: se.Direction,
+		}
+		s.Services = append(s.Services, sh)
+	}
+
 	// Determine overall status.
 	s.Status = deriveStatus(s)
 	return s
@@ -232,7 +255,11 @@ func deriveStatus(s tunnelStatus) string {
 // fetchEnvoyStatsFn is a testability hook for fetching Envoy admin stats.
 var fetchEnvoyStatsFn = fetchEnvoyStats
 
+// fetchClusterHealthFn is a testability hook for fetching per-cluster health from Envoy admin.
+var fetchClusterHealthFn = fetchClusterHealth
+
 // enrichWithEnvoyStats fetches Envoy admin stats for both pods and attaches them.
+// It also queries per-cluster health from the responder to determine per-service status.
 func enrichWithEnvoyStats(s *tunnelStatus, ts state.TunnelState) {
 	ctx := context.Background()
 
@@ -249,6 +276,25 @@ func enrichWithEnvoyStats(s *tunnelStatus, ts state.TunnelState) {
 		stats := fetchEnvoyStatsFn(ctx, destClient, s.Responder.PodName, envoy.DefaultResponderAdminPort)
 		if stats != nil {
 			s.Responder.Stats = stats
+		}
+
+		// Fetch per-cluster health for service-level reporting.
+		if len(s.Services) > 0 {
+			clusterHealth := fetchClusterHealthFn(ctx, destClient, s.Responder.PodName, envoy.DefaultResponderAdminPort)
+			if clusterHealth != nil {
+				for i := range s.Services {
+					sni := s.Services[i].SNI
+					if sni == "" {
+						sni = s.Services[i].Name
+					}
+					// Match cluster name pattern: "backend_to_<sni>" (from multi-service template).
+					clusterName := "backend_to_" + sni
+					if healthy, ok := clusterHealth[clusterName]; ok {
+						h := healthy
+						s.Services[i].Healthy = &h
+					}
+				}
+			}
 		}
 	}
 }
@@ -324,6 +370,78 @@ func parseEnvoyStats(data []byte) *envoyStats {
 	return stats
 }
 
+// fetchClusterHealth port-forwards to the Envoy admin port and queries /clusters?format=json.
+// Returns a map of cluster name → healthy (true if any host is healthy).
+func fetchClusterHealth(ctx context.Context, client kube.Client, podName string, adminPort int) map[string]bool {
+	localPort, err := findFreePort()
+	if err != nil {
+		return nil
+	}
+
+	session, err := client.PortForward(ctx, "pod/"+podName, localPort, adminPort)
+	if err != nil || session == nil {
+		return nil
+	}
+	defer func() { _ = session.Close() }()
+
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/clusters?format=json", localPort))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	return parseClusterHealth(body)
+}
+
+// envoyClustersResponse mirrors the JSON structure from /clusters?format=json.
+type envoyClustersResponse struct {
+	ClusterStatuses []envoyClusterStatus `json:"cluster_statuses"`
+}
+
+type envoyClusterStatus struct {
+	Name         string            `json:"name"`
+	HostStatuses []envoyHostStatus `json:"host_statuses"`
+}
+
+type envoyHostStatus struct {
+	HealthStatus struct {
+		EdsHealthStatus string `json:"eds_health_status"`
+	} `json:"health_status"`
+}
+
+// parseClusterHealth extracts per-cluster health from the Envoy clusters JSON.
+// Returns a map of cluster name → healthy.
+func parseClusterHealth(data []byte) map[string]bool {
+	var resp envoyClustersResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil
+	}
+
+	result := make(map[string]bool)
+	for _, cs := range resp.ClusterStatuses {
+		healthy := false
+		for _, hs := range cs.HostStatuses {
+			status := hs.HealthStatus.EdsHealthStatus
+			if status == "HEALTHY" || status == "" {
+				healthy = true
+				break
+			}
+		}
+		// If no hosts, mark as unhealthy (cluster exists but no endpoints).
+		if len(cs.HostStatuses) == 0 {
+			healthy = false
+		}
+		result[cs.Name] = healthy
+	}
+	return result
+}
+
 // findFreePort returns a free TCP port on localhost.
 func findFreePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -389,6 +507,27 @@ func printStatusDetail(cmd *cobra.Command, s tunnelStatus) {
 		printEnvoyStats(out, s.Responder.Stats)
 	} else {
 		fmt.Fprintln(out, "Responder:    No pods found")
+	}
+
+	if len(s.Services) > 0 {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Services:")
+		for _, svc := range s.Services {
+			healthStr := "unknown"
+			if svc.Healthy != nil {
+				if *svc.Healthy {
+					healthStr = "healthy"
+				} else {
+					healthStr = "unhealthy"
+				}
+			}
+			lp := svc.LocalPort
+			if lp == 0 {
+				lp = svc.Port
+			}
+			fmt.Fprintf(out, "  %s (SNI: %s)  port: %d  listener: %d  %s\n",
+				svc.Name, svc.SNI, svc.Port, lp, healthStr)
+		}
 	}
 
 	if s.Error != "" {
