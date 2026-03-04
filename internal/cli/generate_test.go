@@ -686,6 +686,76 @@ func TestGenerateWithServices(t *testing.T) {
 	}
 }
 
+func TestGenerateWithSecretRef(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "secretref-output")
+
+	var buf strings.Builder
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--output-dir", outputDir,
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--secret-ref", "my-vault-tls",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No TLS secret file should exist on disk.
+	for _, side := range []string{"source", "destination"} {
+		path := filepath.Join(outputDir, side, "portal-tunnel-tls-secret.yaml")
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s should not have TLS secret in secret-ref mode", side)
+		}
+	}
+
+	// No ca/ directory should exist.
+	caDir := filepath.Join(outputDir, "ca")
+	if _, err := os.Stat(caDir); !os.IsNotExist(err) {
+		t.Error("ca/ directory should not exist in secret-ref mode")
+	}
+
+	// Verify deployment volumes reference the custom secret name.
+	depBytes, err := os.ReadFile(filepath.Join(outputDir, "source", "portal-initiator-deployment.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read initiator deployment: %v", err)
+	}
+	if !strings.Contains(string(depBytes), "my-vault-tls") {
+		t.Error("initiator deployment should reference secret 'my-vault-tls'")
+	}
+
+	depBytes, err = os.ReadFile(filepath.Join(outputDir, "destination", "portal-responder-deployment.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read responder deployment: %v", err)
+	}
+	if !strings.Contains(string(depBytes), "my-vault-tls") {
+		t.Error("responder deployment should reference secret 'my-vault-tls'")
+	}
+
+	// Verify tunnel.yaml records secretRef.
+	metaBytes, err := os.ReadFile(filepath.Join(outputDir, "tunnel.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read tunnel.yaml: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := yaml.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("tunnel.yaml is not valid YAML: %v", err)
+	}
+	if meta["secretRef"] != "my-vault-tls" {
+		t.Errorf("secretRef = %v, want %q", meta["secretRef"], "my-vault-tls")
+	}
+
+	// Verify output mentions using existing secret.
+	output := buf.String()
+	if !strings.Contains(output, "Using existing secret") {
+		t.Errorf("output should mention using existing secret, got:\n%s", output)
+	}
+}
+
 func TestGenerateExposeContextNotFound(t *testing.T) {
 	setupGenerateExposeHooks(t)
 

@@ -28,14 +28,10 @@ static_resources:
               common_tls_context:
                 tls_params:
                   tls_minimum_protocol_version: TLSv1_3
-                tls_certificates:
-                  - certificate_chain:
-                      filename: {{.CertPath}}/tls.crt
-                    private_key:
-                      filename: {{.CertPath}}/tls.key
-                validation_context:
-                  trusted_ca:
-                    filename: {{.CertPath}}/ca.crt
+                tls_certificate_sds_secret_configs:
+                  - name: portal_tls
+                validation_context_sds_secret_config:
+                  name: portal_ca
                 alpn_protocols:
                   - h2
 
@@ -53,3 +49,19 @@ static_resources:
                     socket_address:
                       address: {{.BackendHost}}
                       port_value: {{.BackendPort}}
+
+  secrets:
+    - name: portal_tls
+      tls_certificate:
+        certificate_chain:
+          filename: {{.CertPath}}/tls.crt
+        private_key:
+          filename: {{.CertPath}}/tls.key
+        watched_directory:
+          path: {{.CertPath}}
+    - name: portal_ca
+      validation_context:
+        trusted_ca:
+          filename: {{.CertPath}}/ca.crt
+        watched_directory:
+          path: {{.CertPath}}

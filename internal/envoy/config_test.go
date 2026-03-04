@@ -502,6 +502,112 @@ func TestRenderInitiatorMultiBootstrapDefaults(t *testing.T) {
 	}
 }
 
+func TestSDSWatchedDirectoryPresent(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{
+			"initiator-single",
+			mustRender(t, func() ([]byte, error) {
+				return RenderInitiatorBootstrap(InitiatorConfig{
+					ResponderHost: "10.0.0.1",
+					ResponderPort: 10443,
+					CertPath:      "/etc/portal/certs",
+				})
+			}),
+		},
+		{
+			"responder-single",
+			mustRender(t, func() ([]byte, error) {
+				return RenderResponderBootstrap(ResponderConfig{
+					ListenPort: 10443,
+					CertPath:   "/etc/portal/certs",
+				})
+			}),
+		},
+		{
+			"initiator-multi",
+			mustRender(t, func() ([]byte, error) {
+				return RenderInitiatorMultiBootstrap(InitiatorMultiServiceConfig{
+					ResponderHost: "10.0.0.1",
+					ResponderPort: 10443,
+					CertPath:      "/etc/portal/certs",
+					Services: []ServiceListener{
+						{Name: "backend", ListenPort: 18443, SNI: "backend"},
+					},
+				})
+			}),
+		},
+		{
+			"responder-multi",
+			mustRender(t, func() ([]byte, error) {
+				return RenderResponderMultiBootstrap(ResponderMultiServiceConfig{
+					ListenPort: 10443,
+					CertPath:   "/etc/portal/certs",
+					Services: []ServiceRoute{
+						{SNI: "backend", BackendHost: "backend-svc.ns.svc", BackendPort: 8443},
+					},
+				})
+			}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := string(tc.data)
+
+			// Verify SDS secret references in TLS context.
+			if !strings.Contains(s, "tls_certificate_sds_secret_configs") {
+				t.Error("should contain tls_certificate_sds_secret_configs")
+			}
+			if !strings.Contains(s, "validation_context_sds_secret_config") {
+				t.Error("should contain validation_context_sds_secret_config")
+			}
+			if !strings.Contains(s, "name: portal_tls") {
+				t.Error("should reference portal_tls SDS secret")
+			}
+			if !strings.Contains(s, "name: portal_ca") {
+				t.Error("should reference portal_ca SDS secret")
+			}
+
+			// Verify static secrets section with watched_directory.
+			if !strings.Contains(s, "secrets:") {
+				t.Error("should contain secrets section")
+			}
+			if !strings.Contains(s, "watched_directory:") {
+				t.Error("should contain watched_directory for cert hot-reload")
+			}
+
+			// Verify inline tls_certificates is NOT present in TLS contexts.
+			// The cert paths should only appear inside the secrets section.
+			lines := strings.Split(s, "\n")
+			for i, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "tls_certificates:" {
+					// This key should NOT appear — SDS replaces it.
+					t.Errorf("line %d: found inline tls_certificates (should use SDS instead)", i+1)
+				}
+			}
+
+			// Verify it's valid YAML.
+			var parsed map[string]interface{}
+			if err := yaml.Unmarshal(tc.data, &parsed); err != nil {
+				t.Fatalf("rendered config is not valid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func mustRender(t *testing.T, fn func() ([]byte, error)) []byte {
+	t.Helper()
+	data, err := fn()
+	if err != nil {
+		t.Fatalf("render error: %v", err)
+	}
+	return data
+}
+
 func TestSanitizeStatPrefix(t *testing.T) {
 	tests := []struct {
 		input string

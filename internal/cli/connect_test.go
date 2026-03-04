@@ -668,6 +668,63 @@ func TestConnectWithServicesSavesState(t *testing.T) {
 	}
 }
 
+func TestConnectWithSecretRefDryRun(t *testing.T) {
+	_, _, _ = setupTestHooks(t)
+
+	var buf strings.Builder
+	cmd := NewConnectCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--secret-ref", "my-vault-tls",
+		"--dry-run",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	// Should not contain a TLS Secret resource.
+	if strings.Contains(output, "portal-tunnel-tls") && strings.Contains(output, "kind: Secret") {
+		t.Error("secret-ref mode should not render TLS Secrets")
+	}
+	// Deployment volumes should reference the custom secret.
+	if !strings.Contains(output, "my-vault-tls") {
+		t.Error("deployment volumes should reference 'my-vault-tls'")
+	}
+}
+
+func TestConnectWithSecretRef(t *testing.T) {
+	_, _, _ = setupTestHooks(t)
+
+	var buf strings.Builder
+	cmd := NewConnectCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--responder-endpoint", "10.0.0.1:10443",
+		"--secret-ref", "my-vault-tls",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Using existing secret") {
+		t.Errorf("output should mention using existing secret, got:\n%s", output)
+	}
+	if !strings.Contains(output, "my-vault-tls") {
+		t.Errorf("output should mention secret name, got:\n%s", output)
+	}
+}
+
 func TestConnectWithServicesDryRun(t *testing.T) {
 	_, _, _ = setupTestHooks(t)
 

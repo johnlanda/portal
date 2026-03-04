@@ -36,6 +36,7 @@ func NewGenerateCmd() *cobra.Command {
 		initiatorCertDir  string
 		responderCertDir  string
 		certManager       bool
+		secretRef         string
 		envoyImage        string
 		envoyLogLevel     string
 		responderEndpoint string
@@ -88,6 +89,7 @@ The --responder-endpoint flag is required. Pass either:
 				InitiatorCertDir:   initiatorCertDir,
 				ResponderCertDir:   responderCertDir,
 				CertManager:        certManager,
+				SecretRef:          secretRef,
 				Services:           services,
 			}
 
@@ -101,7 +103,9 @@ The --responder-endpoint flag is required. Pass either:
 			}
 
 			// Print summary.
-			if certManager {
+			if secretRef != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Using existing secret %q for TLS certificates\n", secretRef)
+			} else if certManager {
 				fmt.Fprintf(cmd.OutOrStdout(), "Generated tunnel manifests with cert-manager CRDs\n")
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "Generated tunnel CA and certificates\n")
@@ -128,6 +132,7 @@ The --responder-endpoint flag is required. Pass either:
 	cmd.Flags().StringVar(&initiatorCertDir, "initiator-cert-dir", "", "Directory with initiator certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().StringVar(&responderCertDir, "responder-cert-dir", "", "Directory with responder certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().BoolVar(&certManager, "cert-manager", false, "Use cert-manager CRDs for certificate management instead of raw secrets")
+	cmd.Flags().StringVar(&secretRef, "secret-ref", "", "Reference an existing K8s Secret for TLS certificates (skip cert generation)")
 	cmd.Flags().StringVar(&envoyImage, "envoy-image", manifest.DefaultEnvoyImage, "Envoy proxy image")
 	cmd.Flags().StringVar(&envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
 	cmd.Flags().StringVar(&serviceType, "service-type", manifest.DefaultServiceType, "Responder Service type (LoadBalancer, NodePort, ClusterIP)")

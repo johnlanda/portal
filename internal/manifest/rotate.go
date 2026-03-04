@@ -39,6 +39,11 @@ func RotateCertificates(cfg RotateConfig) (*TunnelMetadata, error) {
 		return nil, fmt.Errorf("this tunnel uses cert-manager for certificate management; rotation is handled automatically by cert-manager")
 	}
 
+	// Guard: detect secret-ref tunnels.
+	if meta.SecretRef != "" {
+		return nil, fmt.Errorf("this tunnel uses an externally managed secret (%s); certificate rotation must be performed by the external secret provider", meta.SecretRef)
+	}
+
 	// Read CA material.
 	caCert, caKey, err := readCAMaterial(filepath.Join(cfg.TunnelDir, "ca"))
 	if err != nil {

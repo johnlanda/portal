@@ -94,6 +94,7 @@ type TunnelConfig struct {
 	InitiatorCertDir   string                // Separate cert path for initiator
 	ResponderCertDir   string                // Separate cert path for responder
 	ExternalCerts      *ExternalCertificates // PEM bytes for library API
+	SecretRef          string                // Name of existing K8s Secret to reference (skip cert generation)
 }
 
 // ManifestBundle contains all rendered Kubernetes resources for both sides of a tunnel.
@@ -126,6 +127,7 @@ type TunnelMetadata struct {
 	LastRotatedAt      *time.Time      `yaml:"lastRotatedAt,omitempty"`
 	RotationCount      int             `yaml:"rotationCount,omitempty"`
 	Services           []ServiceConfig `yaml:"services,omitempty"`
+	SecretRef          string          `yaml:"secretRef,omitempty"`
 }
 
 // Render generates a complete ManifestBundle for a tunnel.
@@ -229,7 +231,23 @@ func Render(cfg TunnelConfig) (*ManifestBundle, error) {
 	}
 
 	var tunnelCerts *certs.TunnelCertificates
-	if cfg.CertManager {
+	if cfg.SecretRef != "" {
+		// Validate mutual exclusivity with other cert options.
+		if cfg.CertManager {
+			return nil, fmt.Errorf("--secret-ref cannot be combined with --cert-manager")
+		}
+		if cfg.CertDir != "" {
+			return nil, fmt.Errorf("--secret-ref cannot be combined with --cert-dir")
+		}
+		if cfg.InitiatorCertDir != "" || cfg.ResponderCertDir != "" {
+			return nil, fmt.Errorf("--secret-ref cannot be combined with --initiator-cert-dir/--responder-cert-dir")
+		}
+		if cfg.ExternalCerts != nil {
+			return nil, fmt.Errorf("--secret-ref cannot be combined with external certificates")
+		}
+		// Secret-ref mode: skip all cert generation.
+		// Deployments will reference cfg.SecretRef in their volume spec.
+	} else if cfg.CertManager {
 		// cert-manager mode: append CRDs instead of raw secrets.
 		cmSource, cmDest, cmShared, cmErr := buildCertManagerResources(cfg.TunnelName, cfg.Namespace, cfg.CertValidity, responderSANs)
 		if cmErr != nil {
@@ -312,6 +330,7 @@ func Render(cfg TunnelConfig) (*ManifestBundle, error) {
 		CertValidity:       cfg.CertValidity.String(),
 		ResponderSANs:      responderSANs,
 		Services:           cfg.Services,
+		SecretRef:          cfg.SecretRef,
 	}
 
 	return &ManifestBundle{
@@ -441,6 +460,11 @@ func buildSecret(name, namespace string, cert, key, ca []byte) (Resource, error)
 }
 
 func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
+	secretName := "portal-tunnel-tls"
+	if cfg.SecretRef != "" {
+		secretName = cfg.SecretRef
+	}
+
 	// Build container ports.
 	var containerPorts []interface{}
 	if len(cfg.Services) > 0 {
@@ -555,7 +579,7 @@ func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
 						map[string]interface{}{
 							"name": "certs",
 							"secret": map[string]interface{}{
-								"secretName": "portal-tunnel-tls",
+								"secretName": secretName,
 							},
 						},
 					},
@@ -567,6 +591,11 @@ func buildInitiatorDeployment(cfg TunnelConfig) (Resource, error) {
 }
 
 func buildResponderDeployment(cfg TunnelConfig) (Resource, error) {
+	secretName := "portal-tunnel-tls"
+	if cfg.SecretRef != "" {
+		secretName = cfg.SecretRef
+	}
+
 	dep := map[string]interface{}{
 		"apiVersion": "apps/v1",
 		"kind":       "Deployment",
@@ -665,7 +694,7 @@ func buildResponderDeployment(cfg TunnelConfig) (Resource, error) {
 						map[string]interface{}{
 							"name": "certs",
 							"secret": map[string]interface{}{
-								"secretName": "portal-tunnel-tls",
+								"secretName": secretName,
 							},
 						},
 					},

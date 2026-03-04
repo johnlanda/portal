@@ -1223,6 +1223,204 @@ func TestRenderWithSharedCertDir(t *testing.T) {
 	assertResourceExists(t, bundle.Destination, "portal-tunnel-tls-secret.yaml")
 }
 
+func TestRenderWithSecretRef(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		SecretRef:          "my-vault-tls",
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	// Certs should be nil (no cert generation).
+	if bundle.Certs != nil {
+		t.Error("Certs should be nil when using SecretRef")
+	}
+
+	// No TLS secret resource should be present.
+	if findResource(bundle.Source, "portal-tunnel-tls-secret.yaml") != nil {
+		t.Error("source should not have TLS secret in secret-ref mode")
+	}
+	if findResource(bundle.Destination, "portal-tunnel-tls-secret.yaml") != nil {
+		t.Error("destination should not have TLS secret in secret-ref mode")
+	}
+
+	// Source: namespace + SA + configmap + deployment + networkpolicy = 5
+	if len(bundle.Source) != 5 {
+		t.Errorf("got %d source resources, want 5", len(bundle.Source))
+		for _, r := range bundle.Source {
+			t.Logf("  source: %s", r.Filename)
+		}
+	}
+
+	// Destination: namespace + SA + configmap + deployment + service + networkpolicy = 6
+	if len(bundle.Destination) != 6 {
+		t.Errorf("got %d destination resources, want 6", len(bundle.Destination))
+		for _, r := range bundle.Destination {
+			t.Logf("  destination: %s", r.Filename)
+		}
+	}
+
+	// Verify deployment volumes reference the custom secret name.
+	for _, side := range []struct {
+		name      string
+		resources []Resource
+		filename  string
+	}{
+		{"initiator", bundle.Source, "portal-initiator-deployment.yaml"},
+		{"responder", bundle.Destination, "portal-responder-deployment.yaml"},
+	} {
+		r := findResource(side.resources, side.filename)
+		if r == nil {
+			t.Fatalf("%s deployment not found", side.name)
+		}
+		content := string(r.Content)
+		if !strings.Contains(content, "my-vault-tls") {
+			t.Errorf("%s deployment should reference secret 'my-vault-tls'", side.name)
+		}
+		if strings.Contains(content, "portal-tunnel-tls") {
+			t.Errorf("%s deployment should NOT reference default secret name 'portal-tunnel-tls'", side.name)
+		}
+	}
+
+	// Verify metadata includes SecretRef.
+	if bundle.Metadata.SecretRef != "my-vault-tls" {
+		t.Errorf("Metadata.SecretRef = %q, want %q", bundle.Metadata.SecretRef, "my-vault-tls")
+	}
+
+	// Verify all resources are valid YAML.
+	for _, r := range append(bundle.Source, bundle.Destination...) {
+		var parsed map[string]interface{}
+		if err := yaml.Unmarshal(r.Content, &parsed); err != nil {
+			t.Errorf("%s is not valid YAML: %v", r.Filename, err)
+		}
+	}
+}
+
+func TestRenderSecretRefMutualExclusion(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  TunnelConfig
+		want string
+	}{
+		{
+			name: "secret-ref with cert-manager",
+			cfg: TunnelConfig{
+				SourceContext:      "src",
+				DestinationContext: "dst",
+				ResponderEndpoint:  "10.0.0.1:10443",
+				CertValidity:       24 * time.Hour,
+				SecretRef:          "my-secret",
+				CertManager:        true,
+			},
+			want: "--cert-manager",
+		},
+		{
+			name: "secret-ref with cert-dir",
+			cfg: TunnelConfig{
+				SourceContext:      "src",
+				DestinationContext: "dst",
+				ResponderEndpoint:  "10.0.0.1:10443",
+				CertValidity:       24 * time.Hour,
+				SecretRef:          "my-secret",
+				CertDir:            "/some/path",
+			},
+			want: "--cert-dir",
+		},
+		{
+			name: "secret-ref with initiator-cert-dir",
+			cfg: TunnelConfig{
+				SourceContext:      "src",
+				DestinationContext: "dst",
+				ResponderEndpoint:  "10.0.0.1:10443",
+				CertValidity:       24 * time.Hour,
+				SecretRef:          "my-secret",
+				InitiatorCertDir:   "/init",
+				ResponderCertDir:   "/resp",
+			},
+			want: "--initiator-cert-dir",
+		},
+		{
+			name: "secret-ref with external certs",
+			cfg: TunnelConfig{
+				SourceContext:      "src",
+				DestinationContext: "dst",
+				ResponderEndpoint:  "10.0.0.1:10443",
+				CertValidity:       24 * time.Hour,
+				SecretRef:          "my-secret",
+				ExternalCerts: &ExternalCertificates{
+					CACert: []byte("ca"),
+				},
+			},
+			want: "external certificates",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Render(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error for mutually exclusive options")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error should mention %q, got: %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestRenderWithSecretRefWriteToDisk(t *testing.T) {
+	cfg := TunnelConfig{
+		SourceContext:      "src",
+		DestinationContext: "dst",
+		ResponderEndpoint:  "10.0.0.1:10443",
+		CertValidity:       24 * time.Hour,
+		SecretRef:          "my-vault-tls",
+	}
+
+	bundle, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+
+	outputDir := t.TempDir()
+	if err := WriteToDisk(bundle, outputDir); err != nil {
+		t.Fatalf("WriteToDisk() error = %v", err)
+	}
+
+	// No TLS secret file should exist on disk.
+	for _, side := range []string{"source", "destination"} {
+		path := filepath.Join(outputDir, side, "portal-tunnel-tls-secret.yaml")
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s should not have TLS secret file in secret-ref mode", side)
+		}
+	}
+
+	// No ca/ directory should exist.
+	caDir := filepath.Join(outputDir, "ca")
+	if _, err := os.Stat(caDir); !os.IsNotExist(err) {
+		t.Error("ca/ directory should not exist in secret-ref mode")
+	}
+
+	// Verify tunnel.yaml records secretRef.
+	metaBytes, err := os.ReadFile(filepath.Join(outputDir, "tunnel.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read tunnel.yaml: %v", err)
+	}
+	var meta TunnelMetadata
+	if err := yaml.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("tunnel.yaml is not valid YAML: %v", err)
+	}
+	if meta.SecretRef != "my-vault-tls" {
+		t.Errorf("tunnel.yaml SecretRef = %q, want %q", meta.SecretRef, "my-vault-tls")
+	}
+}
+
 func assertResourceExists(t *testing.T, resources []Resource, filename string) {
 	t.Helper()
 	if findResource(resources, filename) == nil {

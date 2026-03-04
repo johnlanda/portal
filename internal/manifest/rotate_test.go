@@ -186,6 +186,40 @@ func TestRotateCertificatesBackwardCompat(t *testing.T) {
 	}
 }
 
+func TestRotateCertificatesSecretRefTunnel(t *testing.T) {
+	tunnelDir := generateTestTunnel(t)
+
+	// Patch tunnel.yaml to set secretRef.
+	metaPath := filepath.Join(tunnelDir, "tunnel.yaml")
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("failed to read tunnel.yaml: %v", err)
+	}
+	var meta TunnelMetadata
+	if err := yaml.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("failed to parse tunnel.yaml: %v", err)
+	}
+	meta.SecretRef = "vault-managed-tls"
+	patched, err := yaml.Marshal(meta)
+	if err != nil {
+		t.Fatalf("failed to marshal patched metadata: %v", err)
+	}
+	if err := os.WriteFile(metaPath, patched, 0644); err != nil {
+		t.Fatalf("failed to write patched tunnel.yaml: %v", err)
+	}
+
+	_, err = RotateCertificates(RotateConfig{TunnelDir: tunnelDir})
+	if err == nil {
+		t.Fatal("expected error when rotating a secret-ref tunnel")
+	}
+	if !strings.Contains(err.Error(), "externally managed") {
+		t.Errorf("error should mention 'externally managed', got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "vault-managed-tls") {
+		t.Errorf("error should mention the secret name, got: %v", err)
+	}
+}
+
 func TestRotateCertificatesCertManagerTunnel(t *testing.T) {
 	tunnelDir := generateTestTunnelCertManager(t)
 

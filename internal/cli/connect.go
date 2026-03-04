@@ -42,6 +42,7 @@ type connectOpts struct {
 	initiatorCertDir  string
 	responderCertDir  string
 	certManager       bool
+	secretRef         string
 	envoyImage        string
 	envoyLogLevel     string
 	serviceType       string
@@ -83,6 +84,7 @@ before deploying the initiator.`,
 	cmd.Flags().StringVar(&opts.initiatorCertDir, "initiator-cert-dir", "", "Directory with initiator certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().StringVar(&opts.responderCertDir, "responder-cert-dir", "", "Directory with responder certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().BoolVar(&opts.certManager, "cert-manager", false, "Use cert-manager CRDs for certificate management")
+	cmd.Flags().StringVar(&opts.secretRef, "secret-ref", "", "Reference an existing K8s Secret for TLS certificates (skip cert generation)")
 	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", manifest.DefaultEnvoyImage, "Envoy proxy image")
 	cmd.Flags().StringVar(&opts.envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
 	cmd.Flags().StringVar(&opts.serviceType, "service-type", manifest.DefaultServiceType, "Responder Service type (LoadBalancer, NodePort, ClusterIP)")
@@ -223,7 +225,9 @@ func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts)
 
 	// 11. Print success output.
 	out := cmd.OutOrStdout()
-	if opts.certManager {
+	if opts.secretRef != "" {
+		fmt.Fprintf(out, "\u2713 Using existing secret %q for TLS certificates\n", opts.secretRef)
+	} else if opts.certManager {
 		fmt.Fprintln(out, "\u2713 Generated tunnel manifests with cert-manager CRDs")
 	} else {
 		fmt.Fprintln(out, "\u2713 Generated tunnel CA and certificates")
@@ -268,6 +272,7 @@ func renderBundle(sourceCtx, destCtx, endpoint string, opts connectOpts, service
 		InitiatorCertDir:   opts.initiatorCertDir,
 		ResponderCertDir:   opts.responderCertDir,
 		CertManager:        opts.certManager,
+		SecretRef:          opts.secretRef,
 		Services:           services,
 	}
 
