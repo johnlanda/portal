@@ -57,7 +57,7 @@ Portal CA (self-signed, per-tunnel)
   └── Responder Server Cert  (CN: portal-responder/<tunnel-name>)
 ```
 
-Supports both built-in PKI (`internal/certs`) and cert-manager integration (`--cert-manager`).
+Supports built-in PKI (`internal/certs`), cert-manager integration (`--cert-manager`), and external secret references (`--secret-ref`). All modes use SDS with `watched_directory` for zero-downtime certificate hot-reload.
 
 ### Package Responsibilities
 
@@ -66,9 +66,9 @@ Supports both built-in PKI (`internal/certs`) and cert-manager integration (`--c
 | `portal` (root) | Go library API: `RenderTunnel`, `RenderTunnelWithServices`, `AddService`, `GenerateCertificates` |
 | `certs` | Generate per-tunnel CA + leaf certificates; rotate leaves from persisted CA |
 | `cli` | Cobra command implementations; orchestrate render → apply → state-update; multi-service flag parsing |
-| `envoy` | Render Envoy bootstrap YAML from Go templates (single-service + multi-service SNI routing) |
+| `envoy` | Render Envoy bootstrap YAML from Go templates (single-service + multi-service SNI routing); SDS with watched_directory for cert hot-reload |
 | `kube` | Shell out to `kubectl` for apply/delete/wait/port-forward; `CommandRunner` interface for testing |
-| `manifest` | Render full K8s manifest bundles; multi-service support; external cert loading; cert-manager CRDs; disk writer |
+| `manifest` | Render full K8s manifest bundles; multi-service support; external cert loading; cert-manager CRDs; `--secret-ref` mode; disk writer |
 | `state` | Thread-safe CRUD for `~/.portal/tunnels.json`; track tunnels, services (`ServiceEntry`), backward-compat migration |
 
 ## Development Conventions

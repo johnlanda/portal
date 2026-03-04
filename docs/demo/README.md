@@ -279,31 +279,26 @@ After sending traffic, a healthy tunnel shows:
 
 #### Step 10: Rotate Certificates (Optional)
 
-After verifying the tunnel, test certificate rotation:
+After verifying the tunnel, test certificate rotation. Envoy picks up the new
+certificates automatically via SDS `watched_directory` -- no pod restart is
+required:
 
 ```bash
 ./portal rotate-certs ./demo-tunnel
 
-# Apply the new secrets
+# Apply the new secrets — Envoy reloads certs automatically via SDS
 kubectl apply -f ./demo-tunnel/destination/portal-tunnel-tls-secret.yaml \
   --context kind-portal-destination
 kubectl apply -f ./demo-tunnel/source/portal-tunnel-tls-secret.yaml \
   --context kind-portal-source
 
-# Restart pods to pick up the new certificates
-kubectl rollout restart deployment/portal-responder -n portal-system \
-  --context kind-portal-destination
-kubectl rollout restart deployment/portal-initiator -n portal-system \
-  --context kind-portal-source
-
-# Wait for rollouts to finish
-kubectl rollout status deployment/portal-responder -n portal-system \
-  --timeout=120s --context kind-portal-destination
-kubectl rollout status deployment/portal-initiator -n portal-system \
-  --timeout=120s --context kind-portal-source
+# No restart needed — wait ~60-90s for kubelet to sync the Secret volumes,
+# then Envoy detects the filesystem change and reloads the certificates.
+sleep 90
 ```
 
-Re-run Step 9 to confirm the tunnel re-establishes with the new certificates.
+Re-run Step 9 to confirm the tunnel continues working with the new certificates
+(zero downtime).
 
 #### Step 11: Clean Up
 

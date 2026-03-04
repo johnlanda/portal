@@ -154,10 +154,10 @@ This document covers all packages in the repository:
 |------|-------|-------------|
 | `config.go` | 230 | Render initiator/responder bootstrap YAML from embedded Go templates; single + multi-service configs |
 | `config_test.go` | 521 | Template rendering tests: port overrides, SNI, multi-service routing, multi-backend |
-| `templates/initiator_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with client TLS, upstream proxy protocol, admin interface |
-| `templates/responder_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with server TLS, client cert validation, backend routing |
-| `templates/initiator_multi_tcp.yaml` | — | Envoy bootstrap: multi-service initiator with N listeners, per-service SNI clusters |
-| `templates/responder_multi_tcp.yaml` | — | Envoy bootstrap: multi-service responder with `tls_inspector`, SNI-based filter chains |
+| `templates/initiator_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with SDS TLS + watched_directory, upstream proxy protocol, admin interface |
+| `templates/responder_tcp.yaml` | — | Envoy bootstrap: single-service TCP proxy with SDS TLS + watched_directory, client cert validation, backend routing |
+| `templates/initiator_multi_tcp.yaml` | — | Envoy bootstrap: multi-service initiator with N listeners, per-service SNI clusters, SDS TLS + watched_directory |
+| `templates/responder_multi_tcp.yaml` | — | Envoy bootstrap: multi-service responder with `tls_inspector`, SNI-based filter chains, SDS TLS + watched_directory |
 
 ### `internal/kube/`
 
@@ -203,6 +203,7 @@ This document covers all packages in the repository:
 | `stability_test.go` | 123 | Recovery and stability: pod restart, reconnection |
 | `certs_test.go` | 164 | Certificate rotation E2E tests |
 | `tunnel_test.go` | 88 | Tunnel topology and multi-tunnel E2E tests |
+| `sds_test.go` | 196 | SDS certificate hot-reload and `--secret-ref` mode E2E tests |
 
 ## Key Types
 
@@ -400,6 +401,7 @@ portal (cmd/portal/main.go)
 │   ├── --cert-manager
 │   ├── --initiator-cert-dir
 │   ├── --responder-cert-dir
+│   ├── --secret-ref (reference existing K8s Secret, skip cert generation)
 │   ├── --envoy-image (default: envoyproxy/envoy:v1.37-latest@sha256:...)
 │   ├── --envoy-log-level (default: info)
 │   ├── --service-type (default: LoadBalancer)
@@ -453,6 +455,7 @@ portal (cmd/portal/main.go)
 | `test/e2e/stability_test.go` | Pod restart and reconnection recovery |
 | `test/e2e/certs_test.go` | Certificate rotation |
 | `test/e2e/tunnel_test.go` | Tunnel topology and multi-tunnel scenarios |
+| `test/e2e/sds_test.go` | SDS certificate hot-reload (zero-downtime rotation) and `--secret-ref` mode |
 | `test/e2e/testutil.go` | Shared helpers: `runPortal`, `kubectlWithContext`, `waitForPods`, etc. |
 
 ## AGENTS.md Maintenance Rule

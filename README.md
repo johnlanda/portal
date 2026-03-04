@@ -211,6 +211,7 @@ Flags:
   --cert-dir             Use existing certs from a shared directory
   --initiator-cert-dir   Use existing certs for initiator from this directory
   --responder-cert-dir   Use existing certs for responder from this directory
+  --secret-ref           Reference an existing K8s Secret for TLS (skip cert generation)
   --envoy-image          Envoy proxy image (default: envoyproxy/envoy:v1.37-latest, pinned by digest)
   --service-type         Responder Service type: LoadBalancer, NodePort, ClusterIP (default: LoadBalancer)
   --service              Service to route: sni=host:port (repeatable)
@@ -236,6 +237,7 @@ Flags:
   --service-local-port   Override initiator listener port: sni=port (repeatable)
   --initiator-cert-dir   Use existing certs for initiator from this directory
   --responder-cert-dir   Use existing certs for responder from this directory
+  --secret-ref           Reference an existing K8s Secret for TLS (skip cert generation)
   (plus all shared flags from connect except deploy-timeout, lb-timeout, dry-run)
 ```
 
@@ -288,15 +290,18 @@ Flags:
 ```
 
 Re-issues leaf certificates from the existing CA. After rotation, re-apply the
-updated secrets and restart the deployments:
+updated secrets -- Envoy picks up the new certificates automatically via SDS
+(no pod restart required):
 
 ```bash
 portal rotate-certs ./tunnel-manifests
 kubectl apply -f ./tunnel-manifests/destination/portal-tunnel-tls-secret.yaml --context dest-ctx
 kubectl apply -f ./tunnel-manifests/source/portal-tunnel-tls-secret.yaml --context source-ctx
-kubectl rollout restart deployment/portal-responder -n portal-system --context dest-ctx
-kubectl rollout restart deployment/portal-initiator -n portal-system --context source-ctx
+# No restart needed — Envoy detects the Secret volume update via SDS watched_directory
 ```
+
+`rotate-certs` is blocked when using `--secret-ref` (certificates are
+externally managed) or `--cert-manager` (cert-manager owns the lifecycle).
 
 ### portal status
 
@@ -359,6 +364,17 @@ The encrypted payload passes through the tunnel transparently as TCP data.
 Using cert-manager to secure your application services is orthogonal to
 Portal's `--cert-manager` flag, which only manages the tunnel transport
 certificates.
+
+### SDS Certificate Hot-Reload
+
+All tunnel modes benefit from Envoy's SDS (Secret Discovery Service) with
+`watched_directory`. When a K8s Secret is updated (by `rotate-certs`,
+cert-manager, Vault, or any external operator), kubelet performs an atomic
+symlink swap on the mounted volume. Envoy detects the filesystem event and
+re-reads the certificate files automatically -- **no pod restart required**.
+
+This means certificate rotation is a zero-downtime operation regardless of
+which certificate management mode you use.
 
 ### Built-in PKI (default)
 
@@ -438,6 +454,38 @@ portal connect source dest --cert-dir ./certs/shared
 
 When using the Go library API, certificates can be provided as PEM bytes via
 the `ExternalCertificates` struct (see Go Library section below).
+
+### External Secret Reference (`--secret-ref`)
+
+If your certificates are managed by an external operator (HashiCorp Vault
+Secrets Operator, External Secrets Operator, or similar), use `--secret-ref`
+to tell Portal to skip all certificate generation and reference an existing
+K8s Secret by name:
+
+```bash
+# Imperative
+portal connect source dest --secret-ref vault-managed-tls
+
+# GitOps
+portal generate source dest \
+  --responder-endpoint "34.120.1.50:10443" \
+  --output-dir ./tunnel-manifests \
+  --secret-ref vault-managed-tls
+```
+
+In this mode:
+
+- **No certificates are generated** -- Portal assumes the named Secret already
+  exists in the tunnel namespace with `tls.crt`, `tls.key`, and `ca.crt` keys.
+- **No `ca/` directory** is created -- there is no Portal-managed CA.
+- **No Secret resource** appears in the generated manifests -- only the
+  Deployment volumes reference the Secret.
+- **`portal rotate-certs` is blocked** -- certificate rotation must be
+  performed by the external operator.
+- **SDS hot-reload** picks up Secret updates automatically (see above).
+
+`--secret-ref` is mutually exclusive with `--cert-manager`, `--cert-dir`,
+`--initiator-cert-dir`, and `--responder-cert-dir`.
 
 ## Generated Kubernetes Resources
 
@@ -575,6 +623,7 @@ type TunnelConfig struct {
     EnvoyLogLevel   string        // default: "info"
     ServiceType     string        // default: "LoadBalancer" (also: "NodePort", "ClusterIP")
     CertManager     bool          // use cert-manager CRDs instead of raw Secrets
+    SecretRef       string        // reference an existing K8s Secret (skip cert generation)
 
     // Multi-service routing (set by RenderTunnelWithServices / AddService):
     Services []ServiceConfig
@@ -784,6 +833,19 @@ bundle, err := portal.RenderTunnel(portal.TunnelConfig{
 })
 // bundle.Certs will be nil — cert-manager handles the PKI.
 // The manifests include Issuer and Certificate CRDs instead of Secrets.
+```
+
+#### Reference an external Secret (Vault, ESO, etc.)
+
+```go
+bundle, err := portal.RenderTunnel(portal.TunnelConfig{
+    SourceContext:      "cluster-a",
+    DestinationContext: "cluster-b",
+    ResponderEndpoint:  "tunnel.example.com:10443",
+    SecretRef:          "vault-managed-tls",
+})
+// bundle.Certs will be nil — no PKI generated.
+// No Secret resource in the manifests — Deployments reference "vault-managed-tls".
 ```
 
 ## Project Layout

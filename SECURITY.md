@@ -104,13 +104,14 @@ Both the initiator and responder enforce strict TLS settings:
 | ALPN | h2 (HTTP/2 for multiplexing) |
 | SNI validation | Initiator validates responder hostname via SNI |
 | Certificate chain validation | Both sides validate against the tunnel CA |
+| Certificate hot-reload | SDS with `watched_directory` — zero-downtime rotation |
 
 ### Certificate Lifecycle
 
 | Event | What Happens |
 |-------|-------------|
 | `portal connect` / `portal generate` | CA + leaf certs generated, stored in Secrets and locally |
-| `portal rotate-certs` | New leaf certs issued from existing CA; Secrets overwritten |
+| `portal rotate-certs` | New leaf certs issued from existing CA; Secrets overwritten; Envoy picks up new certs via SDS (no restart) |
 | Leaf certificate expiry | Manual rotation required (or automatic via cert-manager) |
 | CA certificate expiry | Full tunnel regeneration required |
 | `portal disconnect` | Secrets deleted from both clusters; local CA material removed |
@@ -136,6 +137,27 @@ several important ways:
 - **Monitoring**: Operators should monitor the `Ready` condition on Certificate
   resources (`kubectl get certificate -n portal-system`) and alert on
   `Ready=False` states, which indicate renewal failures.
+
+### External Secret Reference (`--secret-ref`)
+
+When using `--secret-ref`, Portal delegates all certificate management to an
+external operator (Vault Secrets Operator, External Secrets Operator, etc.):
+
+- **No Portal-managed CA**: There is no `ca/` directory or local key material.
+  The external operator owns the full PKI lifecycle.
+- **Trust delegation**: Portal trusts whatever certificate material is in the
+  named Secret. The operator is responsible for ensuring the Secret contains
+  valid `tls.crt`, `tls.key`, and `ca.crt` entries.
+- **Rotation**: Certificate rotation is performed by the external operator.
+  `portal rotate-certs` is blocked in this mode.
+- **SDS hot-reload**: When the external operator updates the Secret, Envoy
+  picks up the new certificates automatically via `watched_directory`.
+
+**Threat**: If the external operator is misconfigured, the Secret may contain
+invalid or expired certificates, causing tunnel failures.
+
+**Mitigation**: Monitor the external operator's health and the tunnel's Envoy
+TLS handshake stats. Use `portal status` to verify connectivity.
 
 ### Certificate Storage
 
@@ -262,17 +284,19 @@ and resource limits, but operators should additionally configure:
 ### Certificate Rotation
 
 Rotate leaf certificates before they expire. The default validity is 1 year.
+Envoy picks up updated certificates automatically via SDS `watched_directory`
+-- no pod restart is required.
 
 ```bash
-# Rotate and apply
+# Rotate and apply — Envoy reloads certs automatically via SDS
 portal rotate-certs ./tunnel-dir
 kubectl apply -f ./tunnel-dir/destination/portal-tunnel-tls-secret.yaml --context dest
 kubectl apply -f ./tunnel-dir/source/portal-tunnel-tls-secret.yaml --context source
-kubectl rollout restart deployment/portal-responder -n portal-system --context dest
-kubectl rollout restart deployment/portal-initiator -n portal-system --context source
+# No restart needed — kubelet syncs the Secret volume, Envoy detects the change
 ```
 
-For zero-touch rotation, use `--cert-manager` mode.
+For zero-touch rotation, use `--cert-manager` mode or `--secret-ref` with an
+external operator (Vault, External Secrets Operator).
 
 ### Monitoring
 
