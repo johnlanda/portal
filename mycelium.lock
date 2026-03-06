@@ -1,0 +1,11 @@
+[meta]
+mycelium_version = "0.1.0"
+embedding_model = "ollama/qwen3-embedding"
+embedding_model_version = ""
+locked_at = "2026-03-06T18:36:13Z"
+schema_version = 1
+
+[sources.local]
+content_hash = "sha256:52a3ab9c560bb9a8ba906cbe52b9336dc7571d03fcb0ffb7fb180a780714361c"
+store_key = "sha256:2a61e8a0435cc5dd9e3e82b3f3957aecf8122e5d7089b3bcccdf65defa86ee41"
+ingestion_type = "built"
