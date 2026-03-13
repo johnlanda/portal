@@ -184,13 +184,138 @@ kubectl apply -k ./tunnel-manifests/destination/ --context destination-ctx
 kubectl apply -k ./tunnel-manifests/source/ --context source-ctx
 ```
 
+## Bare Metal / VM Deployment
+
+Portal can generate deployment artifacts for bare metal hosts and VMs that
+don't run Kubernetes. Instead of K8s manifests, it produces Envoy configs,
+TLS certificates, systemd units, and docker-compose files.
+
+### Quick Start with func-e
+
+[func-e](https://func-e.io/) is a lightweight Envoy binary manager. This is
+the fastest way to test a tunnel between two machines (or two terminals on the
+same machine).
+
+```bash
+# 1. Generate bare metal artifacts
+portal generate source-host dest-host \
+  --target bare-metal \
+  --responder-endpoint "dest-host:10443" \
+  --output-dir ./tunnel
+
+# 2. Deploy the responder (destination machine)
+scp -r ./tunnel/responder/ user@dest-host:/etc/portal/
+ssh user@dest-host 'func-e run -c /etc/portal/envoy.yaml'
+
+# 3. Deploy the initiator (source machine)
+scp -r ./tunnel/initiator/ user@source-host:/etc/portal/
+ssh user@source-host 'func-e run -c /etc/portal/envoy.yaml'
+```
+
+### Quick Start with a Pre-installed Envoy Binary
+
+If Envoy is already installed on the host (e.g., via package manager), point
+`--envoy-command` at the binary:
+
+```bash
+# Generate artifacts using the system Envoy
+portal generate source-host dest-host \
+  --target bare-metal \
+  --responder-endpoint "192.168.1.100:10443" \
+  --envoy-command /usr/bin/envoy \
+  --config-install-path /etc/portal \
+  --cert-install-path /etc/portal/certs \
+  --output-dir ./tunnel
+
+# Copy and install on each host
+scp -r ./tunnel/responder/ user@dest-host:/etc/portal/
+scp -r ./tunnel/initiator/ user@source-host:/etc/portal/
+
+# Start with systemd (production)
+ssh user@dest-host 'sudo cp /etc/portal/portal-responder.service /etc/systemd/system/ && \
+  sudo systemctl daemon-reload && sudo systemctl enable --now portal-responder'
+ssh user@source-host 'sudo cp /etc/portal/portal-initiator.service /etc/systemd/system/ && \
+  sudo systemctl daemon-reload && sudo systemctl enable --now portal-initiator'
+```
+
+### Quick Start with Docker Compose
+
+For hosts with Docker but no Kubernetes:
+
+```bash
+portal generate source-host dest-host \
+  --target bare-metal \
+  --responder-endpoint "dest-host:10443" \
+  --output-dir ./tunnel
+
+# Deploy on each host
+scp -r ./tunnel/responder/ user@dest-host:/opt/portal/
+ssh user@dest-host 'cd /opt/portal && docker compose up -d'
+
+scp -r ./tunnel/initiator/ user@source-host:/opt/portal/
+ssh user@source-host 'cd /opt/portal && docker compose up -d'
+```
+
+### Multi-Service Bare Metal Tunnel
+
+Route multiple backend services over a single tunnel using SNI-based routing:
+
+```bash
+portal generate source-host dest-host \
+  --target bare-metal \
+  --responder-endpoint "192.168.1.100:10443" \
+  --service backend=backend-host:8443 \
+  --service metrics=prometheus-host:9090 \
+  --service-local-port metrics=19090 \
+  --output-dir ./tunnel
+```
+
+### Generated Bare Metal Artifacts
+
+```
+<output-dir>/
+├── initiator/
+│   ├── envoy.yaml              # Envoy bootstrap config
+│   ├── certs/
+│   │   ├── tls.crt             # Initiator client certificate
+│   │   ├── tls.key             # Initiator private key
+│   │   └── ca.crt              # CA certificate
+│   ├── portal-initiator.service  # systemd unit
+│   └── docker-compose.yaml     # Docker Compose file
+├── responder/
+│   ├── envoy.yaml
+│   ├── certs/
+│   │   ├── tls.crt             # Responder server certificate
+│   │   ├── tls.key             # Responder private key
+│   │   └── ca.crt              # CA certificate
+│   ├── portal-responder.service
+│   └── docker-compose.yaml
+├── ca/                         # CA material (keep private)
+│   ├── ca.crt
+│   ├── ca.key
+│   └── .gitignore
+└── tunnel.yaml                 # Tunnel metadata
+```
+
+### Certificate Rotation (Bare Metal)
+
+Rotate leaf certificates without regenerating the CA:
+
+```bash
+portal rotate-certs ./tunnel
+# Then copy updated certs to each host:
+scp ./tunnel/initiator/certs/* user@source-host:/etc/portal/certs/
+scp ./tunnel/responder/certs/* user@dest-host:/etc/portal/certs/
+# Envoy picks up the new certs automatically via SDS watched_directory — no restart needed
+```
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `portal connect` | Deploy a tunnel to both clusters imperatively |
 | `portal disconnect` | Tear down a tunnel and clean up resources |
-| `portal generate` | Generate manifests to disk for GitOps workflows |
+| `portal generate` | Generate manifests to disk (Kubernetes or bare metal) |
 | `portal generate expose` | Generate expose manifests to disk |
 | `portal expose` | Expose a service through an existing tunnel |
 | `portal status` | Show tunnel status and Envoy connection stats |
@@ -228,18 +353,39 @@ deploy the initiator with the real endpoint.
 ### portal generate
 
 ```
-portal generate <source_context> <destination_context> [flags]
+portal generate <source> <destination> [flags]
 
-Flags:
-  --output-dir           Directory to write manifests (required)
+Common Flags:
+  --output-dir           Directory to write artifacts (required)
   --responder-endpoint   Responder address (required)
-  --service              Service to route: sni=host:port (repeatable)
-  --service-local-port   Override initiator listener port: sni=port (repeatable)
+  --target               Deploy target: 'kubernetes' (default) or 'bare-metal'
+  --tunnel-port          Responder listen port (default: 10443)
+  --cert-validity        Certificate validity duration (default: 8760h)
+  --envoy-log-level      Envoy log level (default: info)
+  --cert-dir             Use existing certs from a shared directory
   --initiator-cert-dir   Use existing certs for initiator from this directory
   --responder-cert-dir   Use existing certs for responder from this directory
-  --secret-ref           Reference an existing K8s Secret for TLS (skip cert generation)
-  (plus all shared flags from connect except deploy-timeout, lb-timeout, dry-run)
+  --service              Service to route: sni=host:port (repeatable)
+  --service-local-port   Override initiator listener port: sni=port (repeatable)
+
+Kubernetes-only Flags (--target kubernetes):
+  --namespace            Namespace for portal components (default: portal-system)
+  --connection-count     Number of reverse connections (default: 4)
+  --cert-manager         Use cert-manager CRDs instead of raw Secrets
+  --secret-ref           Reference an existing K8s Secret for TLS
+  --envoy-image          Envoy proxy image (default: envoyproxy/envoy:v1.37-latest)
+  --service-type         Responder Service type (default: LoadBalancer)
+
+Bare-metal-only Flags (--target bare-metal):
+  --envoy-command        Command to run Envoy (default: envoy)
+  --cert-install-path    Path to install certs on host (default: /etc/portal/certs)
+  --config-install-path  Path to install Envoy config on host (default: /etc/portal)
+  --run-user             OS user for running Envoy (default: portal)
 ```
+
+When `--target` is `kubernetes` (default), `<source>` and `<destination>` are
+Kubernetes context names. When `--target` is `bare-metal`, they are host
+identifiers (hostnames or descriptive labels).
 
 Output structure:
 
@@ -588,13 +734,14 @@ The recommended pattern is:
 
 | Function | Description |
 |----------|-------------|
-| `RenderTunnel(cfg)` | Render manifests for a single-service tunnel |
-| `RenderTunnelWithServices(cfg, services)` | Render manifests for a multi-service (SNI-routed) tunnel |
+| `RenderTunnel(cfg)` | Render K8s manifests for a single-service tunnel |
+| `RenderTunnelWithServices(cfg, services)` | Render K8s manifests for a multi-service (SNI-routed) tunnel |
 | `AddService(cfg, existing, newSvc)` | Re-render manifests with an additional service added to the list |
 | `GenerateCertificates(name, SANs, validity)` | Generate mTLS PKI (CA + leaf certs) without rendering manifests |
+| `RenderBareMetalTunnel(cfg)` | Render bare metal artifacts (Envoy config, certs, systemd, docker-compose) |
 
-All render functions return a `*ManifestBundle` containing YAML-encoded
-Kubernetes resources ready to be written to disk or applied to clusters.
+The Kubernetes render functions return a `*ManifestBundle`. The bare metal
+render function returns a `*BareMetalBundle`.
 
 ### Types
 
@@ -848,19 +995,39 @@ bundle, err := portal.RenderTunnel(portal.TunnelConfig{
 // No Secret resource in the manifests — Deployments reference "vault-managed-tls".
 ```
 
+#### Render a bare metal tunnel
+
+```go
+bundle, err := portal.RenderBareMetalTunnel(portal.BareMetalConfig{
+    SourceHost:        "web-server",
+    DestinationHost:   "db-server",
+    ResponderEndpoint: "192.168.1.100:10443",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// bundle.Initiator has: EnvoyConfig, CertFiles, SystemdUnit, DockerCompose
+// bundle.Responder has the same set for the other side
+// Write to disk:
+baremetal.WriteToDisk(bundle, "./tunnel-output")
+```
+
 ## Project Layout
 
 ```
-portal.go              Go library API (RenderTunnel, RenderTunnelWithServices, AddService, GenerateCertificates)
+portal.go              Go library API (RenderTunnel, RenderTunnelWithServices, AddService, GenerateCertificates, RenderBareMetalTunnel)
 cmd/portal/            CLI entrypoint
 internal/
-  cli/                 Command implementations (connect, disconnect, expose, etc.)
+  cli/                 Command implementations (connect, disconnect, expose, generate, etc.)
   manifest/            Kubernetes manifest rendering and disk I/O
+  baremetal/           Bare metal / VM artifact rendering (Envoy configs, systemd, docker-compose)
   envoy/               Envoy bootstrap configuration templates
     templates/         Single-service + multi-service (SNI-routing) Envoy YAML templates
   certs/               mTLS certificate generation and rotation
   kube/                Kubernetes client abstraction (kubectl wrapper)
   state/               Local tunnel state persistence (~/.portal/tunnels.json)
+  validate/            Input validation for names, DNS names, paths, log levels
 docs/
   demo/                Demo walkthrough, scripts, and patches
   PRD.md               Product requirements document

@@ -294,5 +294,8 @@ func (s *Store) saveLocked(sf *StateFile) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
+	if err := os.Chmod(s.path, 0600); err != nil {
+		return fmt.Errorf("failed to set permissions on state file: %w", err)
+	}
 	return nil
 }

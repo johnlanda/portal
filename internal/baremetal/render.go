@@ -16,6 +16,7 @@ import (
 	"github.com/johnlanda/portal/internal/certs"
 	"github.com/johnlanda/portal/internal/envoy"
 	"github.com/johnlanda/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 const (
@@ -121,6 +122,10 @@ type BareMetalMetadata struct {
 // Render generates a complete BareMetalBundle for a tunnel.
 func Render(cfg BareMetalConfig) (*BareMetalBundle, error) {
 	applyDefaults(&cfg)
+
+	if err := validateBareMetalConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid bare metal config: %w", err)
+	}
 
 	host, port, err := parseEndpoint(cfg.ResponderEndpoint, cfg.TunnelPort)
 	if err != nil {
@@ -414,4 +419,26 @@ func readFile(dir, name string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", name, err)
 	}
 	return data, nil
+}
+
+func validateBareMetalConfig(cfg *BareMetalConfig) error {
+	if err := validate.Name(cfg.TunnelName); err != nil {
+		return fmt.Errorf("tunnel name: %w", err)
+	}
+	if err := validate.FilePath(cfg.EnvoyCommand); err != nil {
+		return fmt.Errorf("envoy command: %w", err)
+	}
+	if err := validate.FilePath(cfg.ConfigInstallPath); err != nil {
+		return fmt.Errorf("config install path: %w", err)
+	}
+	if err := validate.Name(cfg.RunUser); err != nil {
+		return fmt.Errorf("run user: %w", err)
+	}
+	if err := validate.DockerImage(cfg.EnvoyImage); err != nil {
+		return fmt.Errorf("envoy image: %w", err)
+	}
+	if err := validate.LogLevel(cfg.EnvoyLogLevel); err != nil {
+		return fmt.Errorf("envoy log level: %w", err)
+	}
+	return nil
 }

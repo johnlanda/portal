@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/johnlanda/portal/internal/manifest"
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 // parseServiceFlags parses --service and --service-local-port flag values into ServiceConfigs.
@@ -39,6 +40,9 @@ func parseServiceFlags(serviceFlags, localPortFlags []string) ([]manifest.Servic
 			return nil, fmt.Errorf("invalid --service format %q: expected sni=host:port", svc)
 		}
 		sni := parts[0]
+		if err := validate.DNSName(sni); err != nil {
+			return nil, fmt.Errorf("invalid SNI in --service %q: %w", svc, err)
+		}
 		if seen[sni] {
 			return nil, fmt.Errorf("duplicate service SNI %q", sni)
 		}
@@ -50,6 +54,9 @@ func parseServiceFlags(serviceFlags, localPortFlags []string) ([]manifest.Servic
 			return nil, fmt.Errorf("invalid --service format %q: expected host:port after '='", svc)
 		}
 		host := hostPort[:lastColon]
+		if err := validate.DNSName(host); err != nil {
+			return nil, fmt.Errorf("invalid host in --service %q: %w", svc, err)
+		}
 		var port int
 		if _, err := fmt.Sscanf(hostPort[lastColon+1:], "%d", &port); err != nil || port < 1 || port > 65535 {
 			return nil, fmt.Errorf("invalid --service format %q: port must be 1-65535", svc)

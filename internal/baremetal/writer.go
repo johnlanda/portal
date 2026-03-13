@@ -64,7 +64,7 @@ func WriteToDisk(bundle *BareMetalBundle, outputDir string) error {
 }
 
 func writeSide(dir, unitName string, side BareMetalSide) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
@@ -78,13 +78,13 @@ func writeSide(dir, unitName string, side BareMetalSide) error {
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return fmt.Errorf("failed to create certs directory: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(certDir, "tls.crt"), side.CertFiles.Cert, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(certDir, "tls.crt"), side.CertFiles.Cert, 0600); err != nil {
 		return fmt.Errorf("failed to write tls.crt: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(certDir, "tls.key"), side.CertFiles.Key, 0600); err != nil {
 		return fmt.Errorf("failed to write tls.key: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(certDir, "ca.crt"), side.CertFiles.CA, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(certDir, "ca.crt"), side.CertFiles.CA, 0600); err != nil {
 		return fmt.Errorf("failed to write ca.crt: %w", err)
 	}
 

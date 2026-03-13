@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"github.com/johnlanda/portal/internal/kube"
 	"github.com/johnlanda/portal/internal/manifest"
 	"github.com/johnlanda/portal/internal/state"
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 // placeholderEndpoint is used when re-rendering manifests for deletion.
@@ -49,6 +51,14 @@ resources from the destination cluster, then removes the tunnel from
 }
 
 func runDisconnect(cmd *cobra.Command, sourceCtx, destCtx string, opts disconnectOpts) error {
+	// 0. Validate input names.
+	if err := validate.Name(sourceCtx); err != nil {
+		return fmt.Errorf("invalid source context: %w", err)
+	}
+	if err := validate.Name(destCtx); err != nil {
+		return fmt.Errorf("invalid destination context: %w", err)
+	}
+
 	// 1. Fail fast if kubectl is missing.
 	if err := checkKubectlFn(); err != nil {
 		return fmt.Errorf("prerequisite check failed: %w", err)
@@ -152,15 +162,19 @@ func deleteExposedServices(ctx context.Context, cmd *cobra.Command, ts *state.Tu
 
 		// Service exposed from source → ClusterIP lives in destination.
 		srcExposeName := fmt.Sprintf("portal-%s-%s", sourceCtx, svcName)
-		srcYAML := buildDeleteServiceYAML(srcExposeName, ns)
-		if err := destClient.Delete(ctx, [][]byte{srcYAML}); err != nil {
+		srcYAML, err := buildDeleteServiceYAML(srcExposeName, ns)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to build delete YAML for %s: %v\n", srcExposeName, err)
+		} else if err := destClient.Delete(ctx, [][]byte{srcYAML}); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to delete exposed service %s from %s: %v\n", srcExposeName, destCtx, err)
 		}
 
 		// Service exposed from destination → ClusterIP lives in source.
 		dstExposeName := fmt.Sprintf("portal-%s-%s", destCtx, svcName)
-		dstYAML := buildDeleteServiceYAML(dstExposeName, ns)
-		if err := sourceClient.Delete(ctx, [][]byte{dstYAML}); err != nil {
+		dstYAML, err := buildDeleteServiceYAML(dstExposeName, ns)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to build delete YAML for %s: %v\n", dstExposeName, err)
+		} else if err := sourceClient.Delete(ctx, [][]byte{dstYAML}); err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to delete exposed service %s from %s: %v\n", dstExposeName, sourceCtx, err)
 		}
 	}
@@ -168,12 +182,15 @@ func deleteExposedServices(ctx context.Context, cmd *cobra.Command, ts *state.Tu
 }
 
 // buildDeleteServiceYAML builds a minimal Service YAML sufficient for kubectl delete.
-func buildDeleteServiceYAML(name, namespace string) []byte {
+func buildDeleteServiceYAML(name, namespace string) ([]byte, error) {
 	// kubectl delete only needs apiVersion, kind, and metadata to identify the resource.
-	return []byte(fmt.Sprintf(`apiVersion: v1
-kind: Service
-metadata:
-  name: %s
-  namespace: %s
-`, name, namespace))
+	svc := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+	}
+	return yaml.Marshal(svc)
 }
