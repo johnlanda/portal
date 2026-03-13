@@ -81,24 +81,51 @@ func RotateCertificates(cfg RotateConfig) (*TunnelMetadata, error) {
 		return nil, fmt.Errorf("failed to rotate certificates: %w", err)
 	}
 
-	// Rebuild and overwrite the TLS secret files.
-	sourceSecret, err := buildSecret("portal-tunnel-tls", meta.Namespace, tunnelCerts.InitiatorCert, tunnelCerts.InitiatorKey, tunnelCerts.CACert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build source secret: %w", err)
-	}
-	destSecret, err := buildSecret("portal-tunnel-tls", meta.Namespace, tunnelCerts.ResponderCert, tunnelCerts.ResponderKey, tunnelCerts.CACert)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build destination secret: %w", err)
-	}
+	if meta.DeployTarget == "bare-metal" {
+		// Bare-metal mode: write PEM files directly to cert directories.
+		for _, side := range []struct {
+			dir  string
+			cert []byte
+			key  []byte
+			ca   []byte
+		}{
+			{"initiator", tunnelCerts.InitiatorCert, tunnelCerts.InitiatorKey, tunnelCerts.CACert},
+			{"responder", tunnelCerts.ResponderCert, tunnelCerts.ResponderKey, tunnelCerts.CACert},
+		} {
+			certDir := filepath.Join(cfg.TunnelDir, side.dir, "certs")
+			if err := os.MkdirAll(certDir, 0700); err != nil {
+				return nil, fmt.Errorf("failed to create cert directory %s: %w", certDir, err)
+			}
+			if err := os.WriteFile(filepath.Join(certDir, "tls.crt"), side.cert, 0644); err != nil {
+				return nil, fmt.Errorf("failed to write %s/certs/tls.crt: %w", side.dir, err)
+			}
+			if err := os.WriteFile(filepath.Join(certDir, "tls.key"), side.key, 0600); err != nil {
+				return nil, fmt.Errorf("failed to write %s/certs/tls.key: %w", side.dir, err)
+			}
+			if err := os.WriteFile(filepath.Join(certDir, "ca.crt"), side.ca, 0644); err != nil {
+				return nil, fmt.Errorf("failed to write %s/certs/ca.crt: %w", side.dir, err)
+			}
+		}
+	} else {
+		// Kubernetes mode: rebuild and overwrite the TLS secret files.
+		sourceSecret, err := buildSecret("portal-tunnel-tls", meta.Namespace, tunnelCerts.InitiatorCert, tunnelCerts.InitiatorKey, tunnelCerts.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build source secret: %w", err)
+		}
+		destSecret, err := buildSecret("portal-tunnel-tls", meta.Namespace, tunnelCerts.ResponderCert, tunnelCerts.ResponderKey, tunnelCerts.CACert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build destination secret: %w", err)
+		}
 
-	sourcePath := filepath.Join(cfg.TunnelDir, "source", sourceSecret.Filename)
-	if err := os.WriteFile(sourcePath, sourceSecret.Content, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write source secret: %w", err)
-	}
+		sourcePath := filepath.Join(cfg.TunnelDir, "source", sourceSecret.Filename)
+		if err := os.WriteFile(sourcePath, sourceSecret.Content, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write source secret: %w", err)
+		}
 
-	destPath := filepath.Join(cfg.TunnelDir, "destination", destSecret.Filename)
-	if err := os.WriteFile(destPath, destSecret.Content, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write destination secret: %w", err)
+		destPath := filepath.Join(cfg.TunnelDir, "destination", destSecret.Filename)
+		if err := os.WriteFile(destPath, destSecret.Content, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write destination secret: %w", err)
+		}
 	}
 
 	// Update tunnel metadata.

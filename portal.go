@@ -21,6 +21,7 @@ package portal
 import (
 	"time"
 
+	"github.com/johnlanda/portal/internal/baremetal"
 	"github.com/johnlanda/portal/internal/certs"
 	"github.com/johnlanda/portal/internal/manifest"
 )
@@ -81,4 +82,19 @@ func AddService(cfg TunnelConfig, existing []ServiceConfig, svc ServiceConfig) (
 // responderSANs should include any DNS names or IPs the responder needs in its cert.
 func GenerateCertificates(tunnelName string, responderSANs []string, validity time.Duration) (*TunnelCertificates, error) {
 	return certs.GenerateTunnelCertificates(tunnelName, responderSANs, validity)
+}
+
+// BareMetalConfig contains all parameters needed to render bare metal tunnel artifacts.
+// This is a re-export of [baremetal.BareMetalConfig] for the public API.
+type BareMetalConfig = baremetal.BareMetalConfig
+
+// BareMetalBundle contains all rendered artifacts for both sides of a bare metal tunnel.
+// This is a re-export of [baremetal.BareMetalBundle] for the public API.
+type BareMetalBundle = baremetal.BareMetalBundle
+
+// RenderBareMetalTunnel generates a complete [BareMetalBundle] for a bare metal
+// or VM tunnel. It produces raw Envoy configs, systemd units, and docker-compose
+// files instead of Kubernetes manifests.
+func RenderBareMetalTunnel(cfg BareMetalConfig) (*BareMetalBundle, error) {
+	return baremetal.Render(cfg)
 }

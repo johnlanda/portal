@@ -38,13 +38,24 @@ CA material in the ca/ directory.`,
 				return fmt.Errorf("failed to rotate certificates: %w", err)
 			}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Rotated certificates for tunnel %q\n", meta.TunnelName)
-			fmt.Fprintf(cmd.OutOrStdout(), "Updated %s/source/portal-tunnel-tls-secret.yaml\n", tunnelDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "Updated %s/destination/portal-tunnel-tls-secret.yaml\n", tunnelDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "Rotation count: %d\n", meta.RotationCount)
-			fmt.Fprintf(cmd.OutOrStdout(), "\nNext steps:\n")
-			fmt.Fprintf(cmd.OutOrStdout(), "  kubectl apply -f %s/destination/portal-tunnel-tls-secret.yaml --context %s\n", tunnelDir, meta.DestinationContext)
-			fmt.Fprintf(cmd.OutOrStdout(), "  kubectl apply -f %s/source/portal-tunnel-tls-secret.yaml --context %s\n", tunnelDir, meta.SourceContext)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Rotated certificates for tunnel %q\n", meta.TunnelName)
+			fmt.Fprintf(out, "Rotation count: %d\n", meta.RotationCount)
+
+			if meta.DeployTarget == "bare-metal" {
+				fmt.Fprintf(out, "Updated %s/initiator/certs/\n", tunnelDir)
+				fmt.Fprintf(out, "Updated %s/responder/certs/\n", tunnelDir)
+				fmt.Fprintf(out, "\nNext steps:\n")
+				fmt.Fprintf(out, "  scp -r %s/responder/certs/ user@%s:/etc/portal/certs/\n", tunnelDir, meta.DestinationContext)
+				fmt.Fprintf(out, "  scp -r %s/initiator/certs/ user@%s:/etc/portal/certs/\n", tunnelDir, meta.SourceContext)
+				fmt.Fprintf(out, "  (Envoy will detect the updated certs via SDS watched_directory — no restart needed)\n")
+			} else {
+				fmt.Fprintf(out, "Updated %s/source/portal-tunnel-tls-secret.yaml\n", tunnelDir)
+				fmt.Fprintf(out, "Updated %s/destination/portal-tunnel-tls-secret.yaml\n", tunnelDir)
+				fmt.Fprintf(out, "\nNext steps:\n")
+				fmt.Fprintf(out, "  kubectl apply -f %s/destination/portal-tunnel-tls-secret.yaml --context %s\n", tunnelDir, meta.DestinationContext)
+				fmt.Fprintf(out, "  kubectl apply -f %s/source/portal-tunnel-tls-secret.yaml --context %s\n", tunnelDir, meta.SourceContext)
+			}
 
 			return nil
 		},

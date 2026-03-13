@@ -162,6 +162,7 @@ func runStatusSingle(cmd *cobra.Command, sourceCtx, destCtx string, opts statusO
 }
 
 // queryTunnelStatus probes both clusters for live pod and service info.
+// For bare-metal tunnels, kubectl-based probes are skipped.
 func queryTunnelStatus(ts state.TunnelState) tunnelStatus {
 	s := tunnelStatus{
 		Name:               ts.Name,
@@ -170,6 +171,21 @@ func queryTunnelStatus(ts state.TunnelState) tunnelStatus {
 		Namespace:          ts.Namespace,
 		TunnelPort:         ts.TunnelPort,
 		Status:             "Unknown",
+	}
+
+	// For bare-metal tunnels, skip kubectl-based probes.
+	if ts.DeployTarget == "bare-metal" {
+		s.Status = "Unknown (bare-metal)"
+		for _, se := range ts.AllServiceEntries() {
+			s.Services = append(s.Services, serviceHealth{
+				Name:      se.Name,
+				SNI:       se.SNI,
+				Port:      se.Port,
+				LocalPort: se.LocalPort,
+				Direction: se.Direction,
+			})
+		}
+		return s
 	}
 
 	ctx := context.Background()

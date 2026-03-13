@@ -776,3 +776,195 @@ func TestGenerateExposeContextNotFound(t *testing.T) {
 		t.Errorf("error should mention 'no tunnel found', got: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Bare-metal generate tests
+// ---------------------------------------------------------------------------
+
+func TestGenerateBareMetalSuccess(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "bm-output")
+
+	var buf strings.Builder
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{
+		"source-host", "dest-host",
+		"--target", "bare-metal",
+		"--output-dir", outputDir,
+		"--responder-endpoint", "10.0.1.50:10443",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	// Verify directory structure.
+	expectedFiles := []string{
+		"initiator/envoy.yaml",
+		"initiator/certs/tls.crt",
+		"initiator/certs/tls.key",
+		"initiator/certs/ca.crt",
+		"initiator/portal-initiator.service",
+		"initiator/docker-compose.yaml",
+		"responder/envoy.yaml",
+		"responder/certs/tls.crt",
+		"responder/certs/tls.key",
+		"responder/certs/ca.crt",
+		"responder/portal-responder.service",
+		"responder/docker-compose.yaml",
+		"ca/ca.crt",
+		"ca/ca.key",
+		"tunnel.yaml",
+	}
+	for _, f := range expectedFiles {
+		path := filepath.Join(outputDir, f)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected file %s does not exist", f)
+		}
+	}
+
+	// Verify tunnel metadata.
+	metaBytes, err := os.ReadFile(filepath.Join(outputDir, "tunnel.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read tunnel.yaml: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := yaml.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("tunnel.yaml is not valid YAML: %v", err)
+	}
+	if meta["tunnelName"] != "source-host--dest-host" {
+		t.Errorf("tunnelName = %v, want %q", meta["tunnelName"], "source-host--dest-host")
+	}
+	if meta["deployTarget"] != "bare-metal" {
+		t.Errorf("deployTarget = %v, want %q", meta["deployTarget"], "bare-metal")
+	}
+
+	// Verify output contains next steps.
+	output := buf.String()
+	if !strings.Contains(output, "func-e") {
+		t.Error("output should contain func-e instructions")
+	}
+	if !strings.Contains(output, "systemd") {
+		t.Error("output should contain systemd instructions")
+	}
+	if !strings.Contains(output, "docker compose") {
+		t.Error("output should contain docker compose instructions")
+	}
+}
+
+func TestGenerateBareMetalWithServices(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "bm-svc-output")
+
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"source-host", "dest-host",
+		"--target", "bare-metal",
+		"--output-dir", outputDir,
+		"--responder-endpoint", "10.0.1.50:10443",
+		"--service", "backend=10.0.1.100:8443",
+		"--service", "otel=10.0.1.101:4317",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	// Verify responder config has multi-service routing.
+	responderBytes, err := os.ReadFile(filepath.Join(outputDir, "responder", "envoy.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read responder envoy.yaml: %v", err)
+	}
+	if !strings.Contains(string(responderBytes), "tls_inspector") {
+		t.Error("responder envoy.yaml should contain tls_inspector for multi-service")
+	}
+}
+
+func TestGenerateBareMetalRejectsK8sFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		flag string
+		val  string
+	}{
+		{"namespace", "--namespace", "custom-ns"},
+		{"cert-manager", "--cert-manager", ""},
+		{"secret-ref", "--secret-ref", "my-secret"},
+		{"service-type", "--service-type", "NodePort"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewGenerateCmd()
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			args := []string{
+				"source-host", "dest-host",
+				"--target", "bare-metal",
+				"--output-dir", t.TempDir(),
+				"--responder-endpoint", "10.0.1.50:10443",
+			}
+			if tt.val != "" {
+				args = append(args, tt.flag, tt.val)
+			} else {
+				args = append(args, tt.flag)
+			}
+			cmd.SetArgs(args)
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("expected error when using %s with bare-metal target", tt.flag)
+			}
+			if !strings.Contains(err.Error(), "not supported with --target bare-metal") {
+				t.Errorf("error should mention 'not supported with --target bare-metal', got: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenerateInvalidTarget(t *testing.T) {
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"src", "dst",
+		"--target", "invalid",
+		"--output-dir", t.TempDir(),
+		"--responder-endpoint", "10.0.0.1:10443",
+	})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid target")
+	}
+	if !strings.Contains(err.Error(), "invalid --target") {
+		t.Errorf("error should mention 'invalid --target', got: %v", err)
+	}
+}
+
+func TestGenerateDefaultTargetIsKubernetes(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "k8s-default")
+
+	cmd := NewGenerateCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{
+		"src-cluster", "dst-cluster",
+		"--output-dir", outputDir,
+		"--responder-endpoint", "10.0.0.1:10443",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+
+	// Verify K8s directory structure (source/destination, not initiator/responder).
+	if _, err := os.Stat(filepath.Join(outputDir, "source")); os.IsNotExist(err) {
+		t.Error("expected source/ directory for kubernetes target")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "destination")); os.IsNotExist(err) {
+		t.Error("expected destination/ directory for kubernetes target")
+	}
+}

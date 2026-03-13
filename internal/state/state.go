@@ -44,6 +44,7 @@ type TunnelState struct {
 	Mode               string         `json:"mode"`
 	Services           []string       `json:"services"`
 	ServiceEntries     []ServiceEntry `json:"service_entries,omitempty"`
+	DeployTarget       string         `json:"deploy_target,omitempty"` // "kubernetes" (default/empty) or "bare-metal"
 }
 
 // AllServiceEntries returns a merged list of service entries from both the legacy

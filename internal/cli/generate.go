@@ -20,9 +20,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/johnlanda/portal/internal/baremetal"
 	"github.com/johnlanda/portal/internal/envoy"
 	"github.com/johnlanda/portal/internal/manifest"
 )
+
+// k8sOnlyFlags lists flags that are only valid for Kubernetes targets.
+var k8sOnlyFlags = []string{"namespace", "cert-manager", "secret-ref", "service-type", "connection-count", "envoy-image"}
 
 // NewGenerateCmd creates the `portal generate` command.
 func NewGenerateCmd() *cobra.Command {
@@ -43,25 +47,31 @@ func NewGenerateCmd() *cobra.Command {
 		serviceType       string
 		serviceFlags      []string
 		serviceLocalPorts []string
+		target            string
+
+		// Bare-metal-specific flags.
+		envoyCommand      string
+		certInstallPath   string
+		configInstallPath string
+		runUser           string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "generate <source_context> <destination_context>",
+		Use:   "generate <source> <destination>",
 		Short: "Generate tunnel manifests to disk for GitOps workflows",
-		Long: `Generate Kubernetes manifests for a Portal tunnel without applying them.
+		Long: `Generate deployment artifacts for a Portal tunnel without applying them.
 
-Produces a complete set of manifests for both the source (initiator) and
-destination (responder) clusters, structured for use with Kustomize, Argo CD,
-Flux, or any other GitOps controller.
+For Kubernetes targets (default), produces K8s manifests structured for use
+with Kustomize, Argo CD, Flux, or kubectl apply.
+
+For bare-metal targets (--target bare-metal), produces raw Envoy configs,
+systemd unit files, and docker-compose files for deployment to VMs or hosts.
 
 The --responder-endpoint flag is required. Pass either:
   - An IP address (e.g., 34.120.1.50:10443) to set loadBalancerIP on the Service
   - A DNS hostname (e.g., tunnel.example.com:10443) to add an external-dns annotation`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sourceContext := args[0]
-			destinationContext := args[1]
-
 			if outputDir == "" {
 				return fmt.Errorf("--output-dir is required")
 			}
@@ -69,79 +79,224 @@ The --responder-endpoint flag is required. Pass either:
 				return fmt.Errorf("--responder-endpoint is required for generate")
 			}
 
-			services, err := parseServiceFlags(serviceFlags, serviceLocalPorts)
-			if err != nil {
-				return fmt.Errorf("invalid service flags: %w", err)
+			switch target {
+			case "kubernetes":
+				return runGenerateKubernetes(cmd, args, generateK8sOpts{
+					outputDir:         outputDir,
+					namespace:         namespace,
+					tunnelPort:        tunnelPort,
+					connectionCount:   connectionCount,
+					certValidity:      certValidity,
+					certDir:           certDir,
+					initiatorCertDir:  initiatorCertDir,
+					responderCertDir:  responderCertDir,
+					certManager:       certManager,
+					secretRef:         secretRef,
+					envoyImage:        envoyImage,
+					envoyLogLevel:     envoyLogLevel,
+					responderEndpoint: responderEndpoint,
+					serviceType:       serviceType,
+					serviceFlags:      serviceFlags,
+					serviceLocalPorts: serviceLocalPorts,
+				})
+			case "bare-metal":
+				// Reject K8s-only flags when targeting bare metal.
+				for _, name := range k8sOnlyFlags {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s is not supported with --target bare-metal", name)
+					}
+				}
+				return runGenerateBareMetal(cmd, args, generateBareMetalOpts{
+					outputDir:         outputDir,
+					tunnelPort:        tunnelPort,
+					certValidity:      certValidity,
+					certDir:           certDir,
+					initiatorCertDir:  initiatorCertDir,
+					responderCertDir:  responderCertDir,
+					envoyLogLevel:     envoyLogLevel,
+					responderEndpoint: responderEndpoint,
+					serviceFlags:      serviceFlags,
+					serviceLocalPorts: serviceLocalPorts,
+					envoyCommand:      envoyCommand,
+					certInstallPath:   certInstallPath,
+					configInstallPath: configInstallPath,
+					runUser:           runUser,
+				})
+			default:
+				return fmt.Errorf("invalid --target %q: must be 'kubernetes' or 'bare-metal'", target)
 			}
-
-			cfg := manifest.TunnelConfig{
-				SourceContext:      sourceContext,
-				DestinationContext: destinationContext,
-				Namespace:          namespace,
-				ResponderEndpoint:  responderEndpoint,
-				TunnelPort:         tunnelPort,
-				ConnectionCount:    connectionCount,
-				CertValidity:       certValidity,
-				EnvoyImage:         envoyImage,
-				EnvoyLogLevel:      envoyLogLevel,
-				ServiceType:        serviceType,
-				CertDir:            certDir,
-				InitiatorCertDir:   initiatorCertDir,
-				ResponderCertDir:   responderCertDir,
-				CertManager:        certManager,
-				SecretRef:          secretRef,
-				Services:           services,
-			}
-
-			bundle, err := manifest.Render(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to render manifests: %w", err)
-			}
-
-			if err := manifest.WriteToDisk(bundle, outputDir); err != nil {
-				return fmt.Errorf("failed to write manifests: %w", err)
-			}
-
-			// Print summary.
-			if secretRef != "" {
-				fmt.Fprintf(cmd.OutOrStdout(), "Using existing secret %q for TLS certificates\n", secretRef)
-			} else if certManager {
-				fmt.Fprintf(cmd.OutOrStdout(), "Generated tunnel manifests with cert-manager CRDs\n")
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "Generated tunnel CA and certificates\n")
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Wrote source cluster manifests      → %s/source/\n", outputDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "Wrote destination cluster manifests → %s/destination/\n", outputDir)
-			fmt.Fprintf(cmd.OutOrStdout(), "\nTunnel name: %s\n", bundle.Metadata.TunnelName)
-			fmt.Fprintf(cmd.OutOrStdout(), "Namespace:   %s\n", bundle.Metadata.Namespace)
-			fmt.Fprintf(cmd.OutOrStdout(), "\nNext steps:\n")
-			fmt.Fprintf(cmd.OutOrStdout(), "  kubectl apply -k %s/destination/ --context %s\n", outputDir, destinationContext)
-			fmt.Fprintf(cmd.OutOrStdout(), "  kubectl apply -k %s/source/ --context %s\n", outputDir, sourceContext)
-
-			return nil
 		},
 	}
 
+	// Common flags.
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "Directory to write manifests (required)")
 	cmd.Flags().StringVar(&responderEndpoint, "responder-endpoint", "", "Responder address (IP:port or hostname:port, required)")
-	cmd.Flags().StringVar(&namespace, "namespace", manifest.DefaultNamespace, "Namespace for portal components")
 	cmd.Flags().IntVar(&tunnelPort, "tunnel-port", manifest.DefaultTunnelPort, "Responder listen port")
-	cmd.Flags().IntVar(&connectionCount, "connection-count", manifest.DefaultConnectionCount, "Number of reverse connections to maintain")
 	cmd.Flags().DurationVar(&certValidity, "cert-validity", 8760*time.Hour, "Certificate validity duration")
 	cmd.Flags().StringVar(&certDir, "cert-dir", "", "Use existing certificates instead of generating")
 	cmd.Flags().StringVar(&initiatorCertDir, "initiator-cert-dir", "", "Directory with initiator certs (tls.crt, tls.key, ca.crt)")
 	cmd.Flags().StringVar(&responderCertDir, "responder-cert-dir", "", "Directory with responder certs (tls.crt, tls.key, ca.crt)")
+	cmd.Flags().StringVar(&envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
+	cmd.Flags().StringArrayVar(&serviceFlags, "service", nil, "Service to route through the tunnel (format: sni=host:port); can be repeated")
+	cmd.Flags().StringArrayVar(&serviceLocalPorts, "service-local-port", nil, "Override initiator listener port for a service (format: sni=port); can be repeated")
+	cmd.Flags().StringVar(&target, "target", "kubernetes", "Deploy target: 'kubernetes' or 'bare-metal'")
+
+	// Kubernetes-only flags.
+	cmd.Flags().StringVar(&namespace, "namespace", manifest.DefaultNamespace, "Namespace for portal components")
+	cmd.Flags().IntVar(&connectionCount, "connection-count", manifest.DefaultConnectionCount, "Number of reverse connections to maintain")
 	cmd.Flags().BoolVar(&certManager, "cert-manager", false, "Use cert-manager CRDs for certificate management instead of raw secrets")
 	cmd.Flags().StringVar(&secretRef, "secret-ref", "", "Reference an existing K8s Secret for TLS certificates (skip cert generation)")
 	cmd.Flags().StringVar(&envoyImage, "envoy-image", manifest.DefaultEnvoyImage, "Envoy proxy image")
-	cmd.Flags().StringVar(&envoyLogLevel, "envoy-log-level", manifest.DefaultEnvoyLogLevel, "Envoy log level")
 	cmd.Flags().StringVar(&serviceType, "service-type", manifest.DefaultServiceType, "Responder Service type (LoadBalancer, NodePort, ClusterIP)")
-	cmd.Flags().StringArrayVar(&serviceFlags, "service", nil, "Service to route through the tunnel (format: sni=host:port); can be repeated")
-	cmd.Flags().StringArrayVar(&serviceLocalPorts, "service-local-port", nil, "Override initiator listener port for a service (format: sni=port); can be repeated")
+
+	// Bare-metal-only flags.
+	cmd.Flags().StringVar(&envoyCommand, "envoy-command", baremetal.DefaultEnvoyCommand, "Command to run Envoy (bare-metal only)")
+	cmd.Flags().StringVar(&certInstallPath, "cert-install-path", baremetal.DefaultCertInstallPath, "Path to install certs on host (bare-metal only)")
+	cmd.Flags().StringVar(&configInstallPath, "config-install-path", baremetal.DefaultConfigInstallPath, "Path to install Envoy config on host (bare-metal only)")
+	cmd.Flags().StringVar(&runUser, "run-user", baremetal.DefaultRunUser, "OS user for running Envoy (bare-metal only)")
 
 	cmd.AddCommand(newGenerateExposeCmd())
 
 	return cmd
+}
+
+// generateK8sOpts holds options for the Kubernetes generate path.
+type generateK8sOpts struct {
+	outputDir, namespace, certDir, initiatorCertDir, responderCertDir string
+	envoyImage, envoyLogLevel, responderEndpoint, serviceType, secretRef string
+	tunnelPort, connectionCount                                          int
+	certValidity                                                         time.Duration
+	certManager                                                          bool
+	serviceFlags, serviceLocalPorts                                      []string
+}
+
+func runGenerateKubernetes(cmd *cobra.Command, args []string, opts generateK8sOpts) error {
+	sourceContext := args[0]
+	destinationContext := args[1]
+
+	services, err := parseServiceFlags(opts.serviceFlags, opts.serviceLocalPorts)
+	if err != nil {
+		return fmt.Errorf("invalid service flags: %w", err)
+	}
+
+	cfg := manifest.TunnelConfig{
+		SourceContext:      sourceContext,
+		DestinationContext: destinationContext,
+		Namespace:          opts.namespace,
+		ResponderEndpoint:  opts.responderEndpoint,
+		TunnelPort:         opts.tunnelPort,
+		ConnectionCount:    opts.connectionCount,
+		CertValidity:       opts.certValidity,
+		EnvoyImage:         opts.envoyImage,
+		EnvoyLogLevel:      opts.envoyLogLevel,
+		ServiceType:        opts.serviceType,
+		CertDir:            opts.certDir,
+		InitiatorCertDir:   opts.initiatorCertDir,
+		ResponderCertDir:   opts.responderCertDir,
+		CertManager:        opts.certManager,
+		SecretRef:          opts.secretRef,
+		Services:           services,
+	}
+
+	bundle, err := manifest.Render(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to render manifests: %w", err)
+	}
+
+	if err := manifest.WriteToDisk(bundle, opts.outputDir); err != nil {
+		return fmt.Errorf("failed to write manifests: %w", err)
+	}
+
+	// Print summary.
+	out := cmd.OutOrStdout()
+	if opts.secretRef != "" {
+		fmt.Fprintf(out, "Using existing secret %q for TLS certificates\n", opts.secretRef)
+	} else if opts.certManager {
+		fmt.Fprintf(out, "Generated tunnel manifests with cert-manager CRDs\n")
+	} else {
+		fmt.Fprintf(out, "Generated tunnel CA and certificates\n")
+	}
+	fmt.Fprintf(out, "Wrote source cluster manifests      → %s/source/\n", opts.outputDir)
+	fmt.Fprintf(out, "Wrote destination cluster manifests → %s/destination/\n", opts.outputDir)
+	fmt.Fprintf(out, "\nTunnel name: %s\n", bundle.Metadata.TunnelName)
+	fmt.Fprintf(out, "Namespace:   %s\n", bundle.Metadata.Namespace)
+	fmt.Fprintf(out, "\nNext steps:\n")
+	fmt.Fprintf(out, "  kubectl apply -k %s/destination/ --context %s\n", opts.outputDir, destinationContext)
+	fmt.Fprintf(out, "  kubectl apply -k %s/source/ --context %s\n", opts.outputDir, sourceContext)
+
+	return nil
+}
+
+// generateBareMetalOpts holds options for the bare-metal generate path.
+type generateBareMetalOpts struct {
+	outputDir, certDir, initiatorCertDir, responderCertDir         string
+	envoyLogLevel, responderEndpoint                               string
+	envoyCommand, certInstallPath, configInstallPath, runUser      string
+	tunnelPort                                                     int
+	certValidity                                                   time.Duration
+	serviceFlags, serviceLocalPorts                                []string
+}
+
+func runGenerateBareMetal(cmd *cobra.Command, args []string, opts generateBareMetalOpts) error {
+	sourceHost := args[0]
+	destinationHost := args[1]
+
+	services, err := parseServiceFlags(opts.serviceFlags, opts.serviceLocalPorts)
+	if err != nil {
+		return fmt.Errorf("invalid service flags: %w", err)
+	}
+
+	cfg := baremetal.BareMetalConfig{
+		SourceHost:        sourceHost,
+		DestinationHost:   destinationHost,
+		ResponderEndpoint: opts.responderEndpoint,
+		TunnelPort:        opts.tunnelPort,
+		CertValidity:      opts.certValidity,
+		EnvoyLogLevel:     opts.envoyLogLevel,
+		EnvoyCommand:      opts.envoyCommand,
+		CertInstallPath:   opts.certInstallPath,
+		ConfigInstallPath: opts.configInstallPath,
+		RunUser:           opts.runUser,
+		CertDir:           opts.certDir,
+		InitiatorCertDir:  opts.initiatorCertDir,
+		ResponderCertDir:  opts.responderCertDir,
+		Services:          services,
+	}
+
+	bundle, err := baremetal.Render(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to render bare-metal artifacts: %w", err)
+	}
+
+	if err := baremetal.WriteToDisk(bundle, opts.outputDir); err != nil {
+		return fmt.Errorf("failed to write bare-metal artifacts: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Generated tunnel CA and certificates\n")
+	fmt.Fprintf(out, "Wrote initiator artifacts → %s/initiator/\n", opts.outputDir)
+	fmt.Fprintf(out, "Wrote responder artifacts → %s/responder/\n", opts.outputDir)
+	fmt.Fprintf(out, "\nTunnel name: %s\n", bundle.Metadata.TunnelName)
+
+	fmt.Fprintf(out, "\nNext steps (using func-e):\n")
+	fmt.Fprintf(out, "  scp -r %s/responder/ user@%s:/tmp/portal/\n", opts.outputDir, destinationHost)
+	fmt.Fprintf(out, "  ssh user@%s 'func-e run -c /tmp/portal/envoy.yaml'\n", destinationHost)
+	fmt.Fprintf(out, "  scp -r %s/initiator/ user@%s:/tmp/portal/\n", opts.outputDir, sourceHost)
+	fmt.Fprintf(out, "  ssh user@%s 'func-e run -c /tmp/portal/envoy.yaml'\n", sourceHost)
+
+	fmt.Fprintf(out, "\nNext steps (using systemd):\n")
+	fmt.Fprintf(out, "  scp -r %s/responder/ user@%s:/tmp/portal/\n", opts.outputDir, destinationHost)
+	fmt.Fprintf(out, "  ssh user@%s 'sudo cp /tmp/portal/portal-responder.service /etc/systemd/system/ && sudo systemctl enable --now portal-responder'\n", destinationHost)
+	fmt.Fprintf(out, "  scp -r %s/initiator/ user@%s:/tmp/portal/\n", opts.outputDir, sourceHost)
+	fmt.Fprintf(out, "  ssh user@%s 'sudo cp /tmp/portal/portal-initiator.service /etc/systemd/system/ && sudo systemctl enable --now portal-initiator'\n", sourceHost)
+
+	fmt.Fprintf(out, "\nNext steps (using Docker):\n")
+	fmt.Fprintf(out, "  scp -r %s/responder/ user@%s:/opt/portal/\n", opts.outputDir, destinationHost)
+	fmt.Fprintf(out, "  ssh user@%s 'cd /opt/portal && docker compose up -d'\n", destinationHost)
+	fmt.Fprintf(out, "  scp -r %s/initiator/ user@%s:/opt/portal/\n", opts.outputDir, sourceHost)
+	fmt.Fprintf(out, "  ssh user@%s 'cd /opt/portal && docker compose up -d'\n", sourceHost)
+
+	return nil
 }
 
 // newGenerateExposeCmd creates the `portal generate expose` subcommand.
