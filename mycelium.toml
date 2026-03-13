@@ -1,0 +1,20 @@
+[config]
+embedding_model = "ollama/qwen3-embedding"
+publish = "github-releases"
+
+[local]
+index = [
+  "./README.md",
+  "./CLAUDE.md",
+  "./AGENTS.md",
+  "./SECURITY.md",
+  "./docs",
+  "./portal.go",
+  "./cmd",
+  "./internal/manifest",
+  "./internal/certs",
+  "./internal/envoy",
+  "./internal/kube",
+  "./internal/state",
+  "./internal/cli",
+]

@@ -9,6 +9,7 @@ import (
 
 	"github.com/johnlanda/portal/internal/envoy"
 	"github.com/johnlanda/portal/internal/state"
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 // exposeOpts holds all flags for the expose command.
@@ -57,6 +58,19 @@ created. Actual traffic routing for this direction requires reverse tunneling (P
 }
 
 func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeOpts) error {
+	// 0. Validate input names.
+	if err := validate.Name(kubeContext); err != nil {
+		return fmt.Errorf("invalid kube context: %w", err)
+	}
+	if err := validate.Name(serviceName); err != nil {
+		return fmt.Errorf("invalid service name: %w", err)
+	}
+	if opts.sni != "" {
+		if err := validate.DNSName(opts.sni); err != nil {
+			return fmt.Errorf("invalid SNI: %w", err)
+		}
+	}
+
 	// 1. Fail fast if kubectl is missing.
 	if err := checkKubectlFn(); err != nil {
 		return fmt.Errorf("prerequisite check failed: %w", err)

@@ -44,6 +44,7 @@ type TunnelState struct {
 	Mode               string         `json:"mode"`
 	Services           []string       `json:"services"`
 	ServiceEntries     []ServiceEntry `json:"service_entries,omitempty"`
+	DeployTarget       string         `json:"deploy_target,omitempty"` // "kubernetes" (default/empty) or "bare-metal"
 }
 
 // AllServiceEntries returns a merged list of service entries from both the legacy
@@ -292,6 +293,9 @@ func (s *Store) saveLocked(sf *StateFile) error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+	if err := os.Chmod(s.path, 0600); err != nil {
+		return fmt.Errorf("failed to set permissions on state file: %w", err)
 	}
 	return nil
 }

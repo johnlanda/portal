@@ -129,6 +129,11 @@ func RotateLeafCertificates(caCertPEM, caKeyPEM []byte, tunnelName string, respo
 		validity = DefaultCertificateValidity
 	}
 
+	// Validate CA material before using it for rotation.
+	if err := validateCAMaterial(caCertPEM, caKeyPEM); err != nil {
+		return nil, fmt.Errorf("CA validation failed: %w", err)
+	}
+
 	expiry := time.Now().Add(validity)
 
 	// Generate new initiator client cert.
@@ -169,6 +174,42 @@ func RotateLeafCertificates(caCertPEM, caKeyPEM []byte, tunnelName string, respo
 	}, nil
 }
 
+// validateCAMaterial verifies that the CA cert has IsCA set and that the key
+// matches the certificate by signing and verifying a test payload.
+func validateCAMaterial(caCertPEM, caKeyPEM []byte) error {
+	caKeyPair, err := tls.X509KeyPair(caCertPEM, caKeyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse CA key pair: %w", err)
+	}
+
+	caCert, err := x509.ParseCertificate(caKeyPair.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse CA certificate: %w", err)
+	}
+
+	if !caCert.IsCA {
+		return fmt.Errorf("certificate is not a CA (IsCA=false)")
+	}
+
+	caKey, ok := caKeyPair.PrivateKey.(*rsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("CA private key has unexpected type %T", caKeyPair.PrivateKey)
+	}
+
+	// Verify the key matches by signing and verifying a test payload.
+	testData := []byte("portal-ca-validation")
+	hash := sha1.Sum(testData)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, caKey, 0, hash[:])
+	if err != nil {
+		return fmt.Errorf("failed to sign test data: %w", err)
+	}
+	if err := rsa.VerifyPKCS1v15(&caKey.PublicKey, 0, hash[:], sig); err != nil {
+		return fmt.Errorf("CA key does not match certificate: %w", err)
+	}
+
+	return nil
+}
+
 // splitNamesAndIPs separates a mixed list of DNS names and IP addresses.
 func splitNamesAndIPs(names []string) (dnsNames []string, ips []net.IP) {
 	for _, name := range names {
@@ -189,7 +230,10 @@ func newCA(cn string, expiry time.Time) ([]byte, []byte, error) {
 	}
 
 	now := time.Now()
-	serial := newSerial(now)
+	serial, err := newSerial()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
 
 	template := &x509.Certificate{
 		SerialNumber: serial,
@@ -246,7 +290,10 @@ func newCert(req *certificateRequest) ([]byte, []byte, error) {
 	}
 
 	now := time.Now()
-	serial := newSerial(now)
+	serial, err := newSerial()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
+	}
 
 	keyUsage := x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
 	var extKeyUsage []x509.ExtKeyUsage
@@ -261,13 +308,14 @@ func newCert(req *certificateRequest) ([]byte, []byte, error) {
 		Subject: pkix.Name{
 			CommonName: req.commonName,
 		},
-		NotBefore:    now.UTC().AddDate(0, 0, -1),
-		NotAfter:     req.expiry.UTC(),
-		SubjectKeyId: bigIntHash(newKey.N),
-		KeyUsage:     keyUsage,
-		ExtKeyUsage:  extKeyUsage,
-		DNSNames:     req.dnsNames,
-		IPAddresses:  req.ipAddresses,
+		NotBefore:      now.UTC().AddDate(0, 0, -1),
+		NotAfter:       req.expiry.UTC(),
+		SubjectKeyId:   bigIntHash(newKey.N),
+		AuthorityKeyId: bigIntHash(caKey.N),
+		KeyUsage:       keyUsage,
+		ExtKeyUsage:    extKeyUsage,
+		DNSNames:       req.dnsNames,
+		IPAddresses:    req.ipAddresses,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &newKey.PublicKey, caKey)
@@ -287,9 +335,10 @@ func newCert(req *certificateRequest) ([]byte, []byte, error) {
 	return certPEM, keyPEM, nil
 }
 
-// newSerial generates a serial number derived from the current time.
-func newSerial(now time.Time) *big.Int {
-	return big.NewInt(now.UnixNano())
+// newSerial generates a cryptographically random serial number (159 bits).
+func newSerial() (*big.Int, error) {
+	max := new(big.Int).Lsh(big.NewInt(1), 159)
+	return rand.Int(rand.Reader, max)
 }
 
 // bigIntHash produces a hash suitable for SubjectKeyId.

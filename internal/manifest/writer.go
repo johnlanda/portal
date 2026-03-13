@@ -75,14 +75,14 @@ func writeCAMaterial(outputDir string, caCert, caKey []byte) error {
 }
 
 func writeResources(dir string, resources []Resource) error {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
 	var filenames []string
 	for _, r := range resources {
 		path := filepath.Join(dir, r.Filename)
-		if err := os.WriteFile(path, r.Content, 0644); err != nil {
+		if err := os.WriteFile(path, r.Content, 0600); err != nil {
 			return fmt.Errorf("failed to write %s: %w", r.Filename, err)
 		}
 		filenames = append(filenames, r.Filename)

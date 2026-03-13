@@ -12,6 +12,7 @@ import (
 	"github.com/johnlanda/portal/internal/kube"
 	"github.com/johnlanda/portal/internal/manifest"
 	"github.com/johnlanda/portal/internal/state"
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 // sentinelEndpoint is used during two-phase render when the real LB address is unknown.
@@ -98,6 +99,14 @@ before deploying the initiator.`,
 }
 
 func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts) error {
+	// 0. Validate input names.
+	if err := validate.Name(sourceCtx); err != nil {
+		return fmt.Errorf("invalid source context: %w", err)
+	}
+	if err := validate.Name(destCtx); err != nil {
+		return fmt.Errorf("invalid destination context: %w", err)
+	}
+
 	// 1. Fail fast if kubectl is missing.
 	if err := checkKubectlFn(); err != nil {
 		return fmt.Errorf("prerequisite check failed: %w", err)

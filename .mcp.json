@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mycelium": {
+      "args": [
+        "serve"
+      ],
+      "command": "/Users/jonathanlanda/dev/mycelium/mctl"
+    }
+  }
+}

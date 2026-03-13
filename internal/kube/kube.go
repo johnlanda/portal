@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 // Client provides operations against a single Kubernetes cluster and namespace.
@@ -69,6 +71,9 @@ func CheckKubectl() error {
 
 // CheckContext verifies that the given kubeconfig context exists.
 func CheckContext(kubeContext string) error {
+	if err := validate.Name(kubeContext); err != nil {
+		return fmt.Errorf("invalid kube context name: %w", err)
+	}
 	cmd := exec.Command("kubectl", "config", "get-contexts", kubeContext, "--no-headers")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("kube context %q not found in kubeconfig", kubeContext)

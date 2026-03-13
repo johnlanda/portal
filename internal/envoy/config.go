@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/johnlanda/portal/internal/validate"
 )
 
 const (
@@ -180,6 +182,9 @@ func RenderInitiatorMultiBootstrap(cfg InitiatorMultiServiceConfig) ([]byte, err
 		if cfg.Services[i].SNI == "" {
 			cfg.Services[i].SNI = cfg.Services[i].Name
 		}
+		if err := validate.DNSName(cfg.Services[i].SNI); err != nil {
+			return nil, fmt.Errorf("invalid SNI for service %q: %w", cfg.Services[i].Name, err)
+		}
 	}
 	return renderTemplate("initiator-multi-tcp", initiatorMultiTCPTemplate, cfg)
 }
@@ -196,6 +201,9 @@ func RenderResponderMultiBootstrap(cfg ResponderMultiServiceConfig) ([]byte, err
 		cfg.CertPath = DefaultCertPath
 	}
 	for i := range cfg.Services {
+		if err := validate.DNSName(cfg.Services[i].SNI); err != nil {
+			return nil, fmt.Errorf("invalid SNI for service route: %w", err)
+		}
 		if cfg.Services[i].StatPrefix == "" {
 			cfg.Services[i].StatPrefix = sanitizeStatPrefix(cfg.Services[i].SNI)
 		}

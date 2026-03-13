@@ -114,6 +114,7 @@ type Resource struct {
 // TunnelMetadata stores information about the tunnel for the metadata file.
 type TunnelMetadata struct {
 	TunnelName         string          `yaml:"tunnelName"`
+	DeployTarget       string          `yaml:"deployTarget,omitempty"` // "kubernetes" (default/empty) or "bare-metal"
 	SourceContext      string          `yaml:"sourceContext"`
 	DestinationContext string          `yaml:"destinationContext"`
 	Namespace          string          `yaml:"namespace"`
