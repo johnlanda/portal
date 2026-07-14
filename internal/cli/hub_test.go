@@ -11,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/johnlanda/portal/internal/kube"
+
 	"github.com/johnlanda/portal/internal/state"
 )
 
@@ -271,5 +273,91 @@ func TestRouteUnknownMember(t *testing.T) {
 	initTestHub(t)
 	if _, err := runCommand(t, NewRouteCmd(), "ghost/svc"); err == nil {
 		t.Error("expected error routing to unknown member")
+	}
+}
+
+func TestStatusMember(t *testing.T) {
+	dstMock, _, srcMock := initTestHub(t)
+	tmp := t.TempDir()
+
+	// Enroll via credential for brevity.
+	credPath := filepath.Join(tmp, "acme.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "acme-prod", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewPublishCmd(), "src-member", "inference", "--port", "8080"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewRouteCmd(), "acme-prod/inference"); err != nil {
+		t.Fatal(err)
+	}
+
+	dstMock.getPodsFn = func(_ context.Context, selector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "portal-hub-abc", Ready: true, Phase: kube.PodRunning}}, nil
+	}
+	srcMock.getPodsFn = func(_ context.Context, selector string) ([]kube.PodInfo, error) {
+		return []kube.PodInfo{{Name: "portal-member-xyz", Ready: true, Phase: kube.PodRunning}}, nil
+	}
+	origHandshake := fetchHandshakeStatsFn
+	origProbe := probeRouteFn
+	fetchHandshakeStatsFn = func(_ context.Context, _ kube.Client, _ string) *tunnelCounts {
+		return &tunnelCounts{Accepted: 42, ValidationFailed: 1}
+	}
+	probeRouteFn = func(_ context.Context, _ kube.Client, _ string, _ int, service, member string) routeProbe {
+		return routeProbe{Service: service, State: "not-published", Detail: "member Envoy returned 404"}
+	}
+	t.Cleanup(func() {
+		fetchHandshakeStatsFn = origHandshake
+		probeRouteFn = origProbe
+	})
+
+	out, err := runCommand(t, NewStatusCmd(), "acme-prod")
+	if err != nil {
+		t.Fatalf("status failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"MEMBER acme-prod",
+		"42 accepted",
+		"validation failures indicate identity mismatches",
+		"not-published",
+		"inference-acme-prod",
+		"member pod  portal-member-xyz",
+		"published   inference :8080 http",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestStatusSummaryShowsHubsAndMemberships(t *testing.T) {
+	_, _, _ = initTestHub(t)
+	tmp := t.TempDir()
+	credPath := filepath.Join(tmp, "acme.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "acme-prod", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCommand(t, NewStatusCmd())
+	if err != nil {
+		t.Fatalf("status failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{"hub synapse", "tunnel.corp.example:10443", "acme-prod", "membership acme-prod"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestStatusUnknownMemberArg(t *testing.T) {
+	setupHubTestHooks(t)
+	if _, err := runCommand(t, NewStatusCmd(), "ghost"); err == nil {
+		t.Error("expected error for unknown member arg")
 	}
 }
