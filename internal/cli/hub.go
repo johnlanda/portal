@@ -27,7 +27,7 @@ func NewHubCmd() *cobra.Command {
 reverse tunnel connections from egress-only members and routes hub-originated
 requests to their published services. See 'portal join' for the member side.`,
 	}
-	cmd.AddCommand(newHubInitCmd(), newHubSignCmd(), newHubInviteCmd(), newHubEvictCmd())
+	cmd.AddCommand(newHubInitCmd(), newHubSignCmd(), newHubInviteCmd(), newHubEvictCmd(), newHubExposeCmd())
 	return cmd
 }
 

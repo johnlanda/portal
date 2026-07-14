@@ -23,10 +23,18 @@ type mockKubeClient struct {
 	getServiceFn         func(ctx context.Context, name string) (*kube.ServiceInfo, error)
 	rolloutRestartFn     func(ctx context.Context, deployment string) error
 	patchSecretFn        func(ctx context.Context, name string, data map[string][]byte) error
+	getSecretKeyFn       func(ctx context.Context, name, key string) ([]byte, error)
 
 	applyCalls          int
 	rolloutRestartCalls int
 	patchSecretCalls    int
+}
+
+func (m *mockKubeClient) GetSecretKey(ctx context.Context, name, key string) ([]byte, error) {
+	if m.getSecretKeyFn != nil {
+		return m.getSecretKeyFn(ctx, name, key)
+	}
+	return []byte("mock-secret-value"), nil
 }
 
 func (m *mockKubeClient) PatchSecret(ctx context.Context, name string, data map[string][]byte) error {

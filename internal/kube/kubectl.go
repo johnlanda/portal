@@ -342,3 +342,22 @@ func (c *kubectlClient) PatchSecret(ctx context.Context, name string, data map[s
 	}
 	return nil
 }
+
+// GetSecretKey returns the decoded value of a single key in a Secret.
+func (c *kubectlClient) GetSecretKey(ctx context.Context, name, key string) ([]byte, error) {
+	// Dots in Secret keys must be escaped in the jsonpath expression.
+	escaped := strings.ReplaceAll(key, ".", "\\.")
+	args := append(c.baseArgs(), "get", "secret", name, "-o", fmt.Sprintf("jsonpath={.data.%s}", escaped))
+	stdout, stderr, err := c.runner.Run(ctx, nil, "kubectl", args...)
+	if err != nil {
+		return nil, &KubectlError{Command: "get secret", Stderr: strings.TrimSpace(string(stderr)), Err: err}
+	}
+	if len(stdout) == 0 {
+		return nil, &NotFoundError{Resource: fmt.Sprintf("secret/%s key %s", name, key)}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(stdout))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode secret key %s: %w", key, err)
+	}
+	return decoded, nil
+}

@@ -358,9 +358,9 @@ func buildExposeService(ctxName, namespace, component, serviceName string, servi
 			"name":      fmt.Sprintf("portal-%s-%s", ctxName, serviceName),
 			"namespace": namespace,
 			"labels": map[string]interface{}{
-				"app.kubernetes.io/managed-by":  "portal",
-				"app.kubernetes.io/component":   "exposed-service",
-				"portal.johnlanda.io/service": serviceName,
+				"app.kubernetes.io/managed-by": "portal",
+				"app.kubernetes.io/component":  "exposed-service",
+				"portal.johnlanda.io/service":  serviceName,
 			},
 		},
 		"spec": map[string]interface{}{

@@ -162,7 +162,7 @@ The --responder-endpoint flag is required. Pass either:
 
 // generateK8sOpts holds options for the Kubernetes generate path.
 type generateK8sOpts struct {
-	outputDir, namespace, certDir, initiatorCertDir, responderCertDir string
+	outputDir, namespace, certDir, initiatorCertDir, responderCertDir    string
 	envoyImage, envoyLogLevel, responderEndpoint, serviceType, secretRef string
 	tunnelPort, connectionCount                                          int
 	certValidity                                                         time.Duration
@@ -229,12 +229,12 @@ func runGenerateKubernetes(cmd *cobra.Command, args []string, opts generateK8sOp
 
 // generateBareMetalOpts holds options for the bare-metal generate path.
 type generateBareMetalOpts struct {
-	outputDir, certDir, initiatorCertDir, responderCertDir         string
-	envoyLogLevel, responderEndpoint                               string
-	envoyCommand, certInstallPath, configInstallPath, runUser      string
-	tunnelPort                                                     int
-	certValidity                                                   time.Duration
-	serviceFlags, serviceLocalPorts                                []string
+	outputDir, certDir, initiatorCertDir, responderCertDir    string
+	envoyLogLevel, responderEndpoint                          string
+	envoyCommand, certInstallPath, configInstallPath, runUser string
+	tunnelPort                                                int
+	certValidity                                              time.Duration
+	serviceFlags, serviceLocalPorts                           []string
 }
 
 func runGenerateBareMetal(cmd *cobra.Command, args []string, opts generateBareMetalOpts) error {

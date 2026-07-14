@@ -361,3 +361,154 @@ func TestStatusUnknownMemberArg(t *testing.T) {
 		t.Error("expected error for unknown member arg")
 	}
 }
+
+func TestForwardLifecycle(t *testing.T) {
+	_, storePath, srcMock := initTestHub(t)
+	tmp := t.TempDir()
+	credPath := filepath.Join(tmp, "acme.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "acme-prod", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hub side: expose a backend on the forward path.
+	out, err := runCommand(t, NewHubCmd(), "expose", "telemetry", "--port", "4317", "--service-namespace", "monitoring")
+	if err != nil {
+		t.Fatalf("hub expose failed: %v\n%s", err, out)
+	}
+	store := state.NewStore(storePath)
+	hub, _ := store.GetHub("synapse")
+	if len(hub.Services) != 1 || hub.Services[0].SNI != "telemetry" {
+		t.Fatalf("hub service not recorded: %+v", hub.Services)
+	}
+	if hub.Services[0].Name != "telemetry.monitoring.svc.cluster.local" {
+		t.Errorf("backend host = %q", hub.Services[0].Name)
+	}
+
+	// Reserved SNI rejected.
+	if _, err := runCommand(t, NewHubCmd(), "expose", "svc2", "--port", "1", "--sni", hub.HandshakeSNI); err == nil {
+		t.Error("expected reserved-SNI error")
+	}
+
+	// Member side: add the local listener.
+	applyBefore := srcMock.applyCalls
+	out, err = runCommand(t, NewForwardCmd(), "src-member", "telemetry", "--local-port", "4317")
+	if err != nil {
+		t.Fatalf("forward failed: %v\n%s", err, out)
+	}
+	if srcMock.applyCalls == applyBefore {
+		t.Error("forward did not re-apply member resources")
+	}
+	membership, _ := store.GetMembership("acme-prod")
+	if len(membership.Forward) != 1 || membership.Forward[0].LocalPort != 4317 {
+		t.Fatalf("forward listener not recorded: %+v", membership.Forward)
+	}
+
+	// Duplicate port rejected.
+	if _, err := runCommand(t, NewForwardCmd(), "src-member", "other", "--local-port", "4317"); err == nil {
+		t.Error("expected duplicate local port error")
+	}
+
+	// Remove.
+	if _, err := runCommand(t, NewForwardCmd(), "src-member", "telemetry", "--remove"); err != nil {
+		t.Fatalf("forward --remove failed: %v", err)
+	}
+	membership, _ = store.GetMembership("acme-prod")
+	if len(membership.Forward) != 0 {
+		t.Errorf("forward listener not removed: %+v", membership.Forward)
+	}
+}
+
+func TestRenewLifecycle(t *testing.T) {
+	_, _, srcMock := initTestHub(t)
+	tmp := t.TempDir()
+	credPath := filepath.Join(tmp, "acme.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "acme-prod", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 1: stage new key + emit CSR.
+	csrPath := filepath.Join(tmp, "renew.csr")
+	var staged map[string][]byte
+	srcMock.patchSecretFn = func(_ context.Context, name string, data map[string][]byte) error {
+		staged = data
+		return nil
+	}
+	out, err := runCommand(t, NewRenewCmd(), "src-member", "--csr-out", csrPath)
+	if err != nil {
+		t.Fatalf("renew phase 1 failed: %v\n%s", err, out)
+	}
+	if _, ok := staged["tls.key.next"]; !ok {
+		t.Fatal("renewal key was not staged under tls.key.next")
+	}
+	stagedKey := staged["tls.key.next"]
+
+	// Hub signs the renewal CSR (replaces the recorded serial).
+	bundlePath := filepath.Join(tmp, "renewed.pem")
+	if _, err := runCommand(t, NewHubCmd(), "sign", csrPath, "--member", "acme-prod", "-o", bundlePath); err != nil {
+		t.Fatalf("hub sign (renewal) failed: %v", err)
+	}
+
+	// Phase 2: promote staged key + new cert atomically.
+	srcMock.getSecretKeyFn = func(_ context.Context, name, key string) ([]byte, error) {
+		if key != "tls.key.next" {
+			t.Errorf("unexpected secret key read: %s", key)
+		}
+		return stagedKey, nil
+	}
+	var promoted map[string][]byte
+	srcMock.patchSecretFn = func(_ context.Context, name string, data map[string][]byte) error {
+		promoted = data
+		return nil
+	}
+	out, err = runCommand(t, NewRenewCmd(), "src-member", "--cert", bundlePath)
+	if err != nil {
+		t.Fatalf("renew phase 2 failed: %v\n%s", err, out)
+	}
+	if string(promoted["tls.key"]) != string(stagedKey) {
+		t.Error("staged key was not promoted to tls.key")
+	}
+	if len(promoted["tls.crt"]) == 0 || len(promoted["ca.crt"]) == 0 {
+		t.Error("renewed cert/CA not installed")
+	}
+}
+
+func TestMigrateGuided(t *testing.T) {
+	_, _, storePath := setupHubTestHooks(t)
+	store := state.NewStore(storePath)
+	if err := store.Add(state.TunnelState{
+		Name: "src-a--dst-b", SourceContext: "src-a", DestinationContext: "dst-b",
+		Namespace: "portal-system", TunnelPort: 10443, Mode: "imperative",
+		ServiceEntries: []state.ServiceEntry{{Name: "backend", Port: 8443, SNI: "backend", LocalPort: 8443}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runCommand(t, NewMigrateCmd(), "src-a", "dst-b")
+	if err != nil {
+		t.Fatalf("migrate failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"RE-KEYS",
+		"portal disconnect src-a dst-b",
+		"portal hub init dst-b",
+		"portal hub invite src-a",
+		"portal join src-a --credential",
+		"portal hub expose backend --port 8443",
+		"portal forward src-a backend --local-port 8443",
+		"portal status src-a",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("migration plan missing %q:\n%s", want, out)
+		}
+	}
+
+	if _, err := runCommand(t, NewMigrateCmd(), "ghost", "tunnel"); err == nil {
+		t.Error("expected error for unknown tunnel")
+	}
+}

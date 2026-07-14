@@ -34,6 +34,9 @@ func main() {
 		cli.NewUnpublishCmd(),
 		cli.NewLeaveCmd(),
 		cli.NewRouteCmd(),
+		cli.NewForwardCmd(),
+		cli.NewRenewCmd(),
+		cli.NewMigrateCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

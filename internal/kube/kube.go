@@ -38,6 +38,8 @@ type Client interface {
 	// PatchSecret merges the given keys into an existing Secret's data
 	// without reading or rewriting the keys it does not name.
 	PatchSecret(ctx context.Context, name string, data map[string][]byte) error
+	// GetSecretKey returns the decoded value of a single key in a Secret.
+	GetSecretKey(ctx context.Context, name, key string) ([]byte, error)
 }
 
 // ClientOption configures a Client.
