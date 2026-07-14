@@ -3,12 +3,14 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"os"
 	"strconv"
 
 	"github.com/johnlanda/portal/internal/envoy"
+	"github.com/johnlanda/portal/internal/manifest"
 )
 
 // envoyDefaultHandshakeSNI aliases the envoy package default for readability
@@ -71,4 +73,11 @@ func splitHostPort(addr string, defaultPort int) (string, int, error) {
 // parseSerial parses a decimal certificate serial.
 func parseSerial(s string) (*big.Int, bool) {
 	return new(big.Int).SetString(s, 10)
+}
+
+// printResources writes rendered manifests to out for --dry-run modes.
+func printResources(out io.Writer, resources []manifest.Resource) {
+	for _, r := range resources {
+		fmt.Fprintf(out, "---\n# %s\n%s", r.Filename, r.Content)
+	}
 }

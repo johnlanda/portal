@@ -117,6 +117,7 @@ type joinOpts struct {
 	deployTimeout         time.Duration
 	envoyImage            string
 	allowUnsupportedEnvoy bool
+	dryRun                bool
 }
 
 // NewJoinCmd creates the `portal join` command.
@@ -156,6 +157,7 @@ Credential mode (single-operator shortcut): portal join <ctx> --credential
 	cmd.Flags().DurationVar(&opts.deployTimeout, "deploy-timeout", 5*time.Minute, "Timeout waiting for deployment readiness")
 	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", "", "Envoy proxy image (default: the pinned image)")
 	cmd.Flags().BoolVar(&opts.allowUnsupportedEnvoy, "allow-unsupported-envoy", false, "Bypass the Envoy version gate (reverse tunnel APIs are experimental upstream)")
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print rendered manifests without applying (credential mode only)")
 	return cmd
 }
 
@@ -332,6 +334,10 @@ func joinWithCredential(cmd *cobra.Command, store *state.Store, kubeContext stri
 	if err != nil {
 		return fmt.Errorf("failed to render member manifests: %w", err)
 	}
+	if opts.dryRun {
+		printResources(cmd.OutOrStdout(), resources)
+		return nil
+	}
 
 	ctx := context.Background()
 	client := newKubeClient(kubeContext, opts.namespace)
@@ -372,6 +378,7 @@ type publishOpts struct {
 	port             int
 	protocol         string
 	serviceNamespace string
+	dryRun           bool
 }
 
 // NewPublishCmd creates the `portal publish` command.
@@ -395,6 +402,7 @@ Raw TCP services cannot be published over the reverse path.`,
 	_ = cmd.MarkFlagRequired("port")
 	cmd.Flags().StringVar(&opts.protocol, "protocol", "http", "Service protocol: http or grpc")
 	cmd.Flags().StringVar(&opts.serviceNamespace, "service-namespace", "default", "Namespace of the service being published")
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print the re-rendered manifests without applying")
 	return cmd
 }
 
@@ -429,6 +437,14 @@ func runPublish(cmd *cobra.Command, kubeContext, service string, opts publishOpt
 		Port:      opts.port,
 		Protocol:  opts.protocol,
 	})
+	if opts.dryRun {
+		resources, err := manifest.RenderMemberManifests(memberDeployConfig(membership))
+		if err != nil {
+			return err
+		}
+		printResources(cmd.OutOrStdout(), resources)
+		return nil
+	}
 	if err := applyMember(context.Background(), membership); err != nil {
 		return err
 	}

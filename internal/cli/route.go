@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/johnlanda/portal/internal/manifest"
 	"github.com/johnlanda/portal/internal/state"
 	"github.com/johnlanda/portal/internal/validate"
 )
@@ -14,6 +15,7 @@ import (
 // NewRouteCmd creates the `portal route` command.
 func NewRouteCmd() *cobra.Command {
 	var hubName, alias string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "route <member>/<service>",
 		Short: "Mint a friendly hub-side name for a published member service",
@@ -26,15 +28,16 @@ Routing itself needs no per-service action — this mints a name. Apps can
 always address the egress listener directly with a <service>.<member> Host.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRoute(cmd, args[0], hubName, alias)
+			return runRoute(cmd, args[0], hubName, alias, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&hubName, "hub", "", "Hub name (required when multiple hubs exist)")
 	cmd.Flags().StringVar(&alias, "as", "", "Alias Service name (default: <service>-<member>)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the re-rendered manifests without applying")
 	return cmd
 }
 
-func runRoute(cmd *cobra.Command, target, hubName, alias string) error {
+func runRoute(cmd *cobra.Command, target, hubName, alias string, dryRun bool) error {
 	parts := strings.SplitN(target, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return fmt.Errorf("target must be <member>/<service>, got %q", target)
@@ -73,6 +76,18 @@ func runRoute(cmd *cobra.Command, target, hubName, alias string) error {
 		Service:      service,
 		AliasService: alias,
 	})
+	if dryRun {
+		cfg, err := hubDeployConfig(hub)
+		if err != nil {
+			return err
+		}
+		resources, err := manifest.RenderHubManifests(cfg)
+		if err != nil {
+			return err
+		}
+		printResources(cmd.OutOrStdout(), resources)
+		return nil
+	}
 	if err := applyHub(context.Background(), hub); err != nil {
 		return err
 	}

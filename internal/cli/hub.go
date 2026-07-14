@@ -172,6 +172,7 @@ type hubInitOpts struct {
 	lbTimeout             time.Duration
 	envoyImage            string
 	allowUnsupportedEnvoy bool
+	dryRun                bool
 }
 
 func newHubInitCmd() *cobra.Command {
@@ -202,6 +203,7 @@ discovered and used as the endpoint members dial.`,
 	cmd.Flags().DurationVar(&opts.lbTimeout, "lb-timeout", 5*time.Minute, "Timeout waiting for LoadBalancer address")
 	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", "", "Envoy proxy image (default: the pinned image)")
 	cmd.Flags().BoolVar(&opts.allowUnsupportedEnvoy, "allow-unsupported-envoy", false, "Bypass the Envoy version gate (reverse tunnel APIs are experimental upstream)")
+	cmd.Flags().BoolVar(&opts.dryRun, "dry-run", false, "Print rendered manifests without applying (uses an ephemeral CA)")
 	return cmd
 }
 
@@ -225,6 +227,10 @@ func runHubInit(cmd *cobra.Command, kubeContext string, opts hubInitOpts) error 
 	}
 	if _, err := store.GetHub(opts.name); err == nil {
 		return fmt.Errorf("hub %q already exists", opts.name)
+	}
+
+	if opts.dryRun {
+		return dryRunHubInit(cmd, opts)
 	}
 
 	// Create the hub CA and persist its material.
@@ -570,6 +576,7 @@ func runHubInvite(cmd *cobra.Command, member string, opts hubInviteOpts) error {
 
 func newHubEvictCmd() *cobra.Command {
 	var hubName string
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "evict <member>",
 		Short: "Revoke a member's certificate and remove its routing",
@@ -578,14 +585,15 @@ Envoy hot-reloads — no restart of other members' tunnels) and removes the
 member from egress routing. Blast radius is the single member.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runHubEvict(cmd, args[0], hubName)
+			return runHubEvict(cmd, args[0], hubName, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&hubName, "hub", "", "Hub name (required when multiple hubs exist)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the re-rendered manifests without applying or revoking")
 	return cmd
 }
 
-func runHubEvict(cmd *cobra.Command, member, hubName string) error {
+func runHubEvict(cmd *cobra.Command, member, hubName string, dryRun bool) error {
 	store, err := newStateStore()
 	if err != nil {
 		return fmt.Errorf("failed to initialize state store: %w", err)
@@ -623,6 +631,21 @@ func runHubEvict(cmd *cobra.Command, member, hubName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to render CRL: %w", err)
 	}
+	if dryRun {
+		cfg, err := hubDeployConfig(hub)
+		if err != nil {
+			return err
+		}
+		cfg.CRLPEM = crlPEM
+		resources, err := manifest.RenderHubManifests(cfg)
+		if err != nil {
+			return err
+		}
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "# DRY RUN — would revoke serial %s and apply:\n", record.CertSerial)
+		printResources(out, resources)
+		return nil
+	}
 	if err := os.WriteFile(filepath.Join(hub.CADir, "crl.pem"), crlPEM, 0o644); err != nil {
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
@@ -637,5 +660,55 @@ func runHubEvict(cmd *cobra.Command, member, hubName string) error {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "✓ Member %q evicted: certificate revoked (serial %s), egress routing removed\n", member, record.CertSerial)
 	fmt.Fprintln(out, "  Existing connections are rejected on the next TLS handshake; other members are unaffected")
+	return nil
+}
+
+// dryRunHubInit renders the hub manifests with an ephemeral CA and prints
+// them without touching the cluster, state, or ~/.portal.
+func dryRunHubInit(cmd *cobra.Command, opts hubInitOpts) error {
+	if opts.publicAddr == "" {
+		return fmt.Errorf("--public-addr is required for --dry-run (cannot discover LB address)")
+	}
+	handshakeSNI := opts.handshakeSNI
+	if handshakeSNI == "" {
+		handshakeSNI = envoyDefaultHandshakeSNI
+	}
+	ca, err := certs.NewHubCA(opts.name, opts.certValidity)
+	if err != nil {
+		return err
+	}
+	host, _, err := splitHostPort(opts.publicAddr, opts.tunnelPort)
+	if err != nil {
+		return fmt.Errorf("invalid --public-addr: %w", err)
+	}
+	certPEM, keyPEM, err := ca.IssueHubServerCert(opts.name, []string{handshakeSNI, host}, opts.certValidity)
+	if err != nil {
+		return err
+	}
+	crlPEM, err := ca.RenderCRL(nil)
+	if err != nil {
+		return err
+	}
+	resources, err := manifest.RenderHubManifests(manifest.HubDeployConfig{
+		HubName:               opts.name,
+		Namespace:             opts.namespace,
+		TunnelPort:            opts.tunnelPort,
+		EgressPort:            opts.egressPort,
+		HandshakeSNI:          handshakeSNI,
+		ServiceType:           opts.serviceType,
+		EnvoyImage:            opts.envoyImage,
+		AllowUnsupportedEnvoy: opts.allowUnsupportedEnvoy,
+		EnableCRL:             true,
+		CertPEM:               certPEM,
+		KeyPEM:                keyPEM,
+		CAPEM:                 ca.CertPEM(),
+		CRLPEM:                crlPEM,
+	})
+	if err != nil {
+		return err
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "# DRY RUN — ephemeral CA; a real init generates and persists the hub CA")
+	printResources(out, resources)
 	return nil
 }

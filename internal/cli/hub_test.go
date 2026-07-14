@@ -512,3 +512,87 @@ func TestMigrateGuided(t *testing.T) {
 		t.Error("expected error for unknown tunnel")
 	}
 }
+
+func TestDryRunModes(t *testing.T) {
+	dstMock, storePath, srcMock := initTestHub(t)
+	tmp := t.TempDir()
+	credPath := filepath.Join(tmp, "acme.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "acme-prod", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+	store := state.NewStore(storePath)
+
+	t.Run("hub init", func(t *testing.T) {
+		applyBefore := dstMock.applyCalls
+		out, err := runCommand(t, NewHubCmd(), "init", "dst-other", "--name", "other",
+			"--public-addr", "x.example:10443", "--dry-run")
+		if err != nil {
+			t.Fatalf("dry-run init failed: %v\n%s", err, out)
+		}
+		if dstMock.applyCalls != applyBefore {
+			t.Error("dry-run applied resources")
+		}
+		if _, err := store.GetHub("other"); err == nil {
+			t.Error("dry-run saved hub state")
+		}
+		if !strings.Contains(out, "portal-hub-deployment.yaml") || !strings.Contains(out, "DRY RUN") {
+			t.Errorf("dry-run output missing manifests:\n%s", out[:min(400, len(out))])
+		}
+	})
+
+	t.Run("publish", func(t *testing.T) {
+		applyBefore := srcMock.applyCalls
+		out, err := runCommand(t, NewPublishCmd(), "src-member", "svc-a", "--port", "8080", "--dry-run")
+		if err != nil {
+			t.Fatalf("dry-run publish failed: %v\n%s", err, out)
+		}
+		if srcMock.applyCalls != applyBefore {
+			t.Error("dry-run applied resources")
+		}
+		m, _ := store.GetMembership("acme-prod")
+		if m.PublishedService("svc-a") != nil {
+			t.Error("dry-run saved publish state")
+		}
+		if !strings.Contains(out, "svc-a.acme-prod") {
+			t.Error("dry-run output missing published route")
+		}
+	})
+
+	t.Run("route", func(t *testing.T) {
+		if _, err := runCommand(t, NewPublishCmd(), "src-member", "inference", "--port", "8080"); err != nil {
+			t.Fatal(err)
+		}
+		restartBefore := dstMock.rolloutRestartCalls
+		out, err := runCommand(t, NewRouteCmd(), "acme-prod/inference", "--dry-run")
+		if err != nil {
+			t.Fatalf("dry-run route failed: %v\n%s", err, out)
+		}
+		if dstMock.rolloutRestartCalls != restartBefore {
+			t.Error("dry-run restarted the hub")
+		}
+		hub, _ := store.GetHub("synapse")
+		if len(hub.Routes) != 0 {
+			t.Error("dry-run saved route state")
+		}
+		if !strings.Contains(out, "inference-acme-prod") {
+			t.Error("dry-run output missing alias resources")
+		}
+	})
+
+	t.Run("evict", func(t *testing.T) {
+		out, err := runCommand(t, NewHubCmd(), "evict", "acme-prod", "--dry-run")
+		if err != nil {
+			t.Fatalf("dry-run evict failed: %v\n%s", err, out)
+		}
+		hub, _ := store.GetHub("synapse")
+		if hub.Member("acme-prod").Evicted {
+			t.Error("dry-run marked member evicted")
+		}
+		if !strings.Contains(out, "would revoke serial") {
+			t.Error("dry-run output missing revocation note")
+		}
+	})
+}
