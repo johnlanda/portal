@@ -4,33 +4,93 @@
   <img src="docs/portal.svg" alt="Portal logo" width="200">
 </p>
 
-Portal creates secure, multiplexed reverse tunnels between Kubernetes clusters
-using [Envoy Proxy](https://www.envoyproxy.io/). It automates mTLS certificate
+Portal creates secure tunnels between Kubernetes clusters using
+[Envoy Proxy](https://www.envoyproxy.io/). It automates mTLS certificate
 provisioning, Envoy deployment on both ends, and tunnel lifecycle management --
 all without introducing new services into the data path.
 
+Portal supports two connectivity modes:
+
+- **Reverse tunnels (hub/member)** -- true connection reversal built on
+  Envoy's native reverse tunnel machinery. An egress-only **member** cluster
+  dials out and maintains persistent connections to an ingress-capable
+  **hub**; the hub then originates requests *into* the member's published
+  services over those connections. The member never opens an inbound port.
+- **Forward tunnels (v1)** -- mTLS TCP proxying with SNI multiplexing. Apps
+  next to the initiator reach services next to the responder. Protocol
+  agnostic (carries raw TCP), but the service side must accept ingress.
+
+A hub/member deployment can use both at once over a single public endpoint:
+the reverse path for hub → member requests (HTTP/gRPC), the forward path for
+member-originated traffic like telemetry export (any TCP).
+
 ## When Are Reverse Tunnels Useful?
 
-Traditional service connectivity requires the target cluster to be reachable
-from the caller. This breaks down in common real-world topologies:
+Traditional service connectivity requires the target to be reachable from the
+caller. This breaks down in common real-world topologies:
 
 - **Private clusters behind NAT/firewalls** -- Clusters in air-gapped
   environments, on-prem data centers, or edge locations cannot accept inbound
   connections from a management plane.
-- **Multi-cloud and hybrid deployments** -- Connecting services across AWS,
-  GCP, Azure, and on-prem without VPN peering or shared network fabric.
+- **Hosted control planes** -- A vendor-hosted management plane needs to push
+  configuration or query components inside customer environments that allow
+  egress only.
 - **Zero-trust networking** -- Avoiding broad firewall rules by having the
   remote side initiate the connection outbound to a known endpoint.
-- **Management plane connectivity** -- A centralized control plane needs to
-  configure and observe deployments in clusters it cannot directly reach.
 
-A reverse tunnel inverts the connection model: the remote (initiator) cluster
-dials out to a publicly reachable endpoint on the destination (responder)
-cluster. Once the mTLS tunnel is established, traffic flows bidirectionally
-over the encrypted connection. No inbound firewall rules are required on the
-initiator side.
+The reverse tunnel inverts the connection model at the transport layer: the
+member establishes and maintains N TCP connections to the hub, and the hub
+multiplexes its requests to the member as HTTP/2 streams over those cached
+connections — traffic flowing opposite to connection establishment. Member
+identity is proven, not asserted: each member's certificate carries its name
+as a DNS SAN, and the hub's `reverse_tunnel` filter rejects handshakes whose
+claimed identity does not match the peer certificate.
 
 ## How It Works
+
+### Reverse tunnels (hub/member)
+
+```mermaid
+flowchart LR
+    subgraph member["Member Cluster (egress only)"]
+        msvc["Published Services\n(inference, admin, ...)"]
+        mEnvoy["portal-member\n(Envoy)\nrc:// listener"]
+        mEnvoy -- "canonical authority\nsvc.member" --> msvc
+    end
+
+    subgraph hub["Hub Cluster (ingress capable)"]
+        happ["Hub Apps"]
+        egress["egress listener :10080\nauthority → member"]
+        tunnel["tunnel listener :10443\ntls_inspector + reverse_tunnel\nfilter (SAN-validated)"]
+        happ --> egress
+        egress -- "cached reverse\nconnections (HTTP/2)" --> tunnel
+    end
+
+    mEnvoy -- "dials out, maintains N\npersistent mTLS connections" --> tunnel
+
+    style member fill:#f0f4ff,stroke:#4a7fff,color:#000
+    style hub fill:#fff4f0,stroke:#e17b31,color:#000
+    style mEnvoy fill:#2ba8d3,stroke:#1a7a9e,color:#fff
+    style tunnel fill:#e17b31,stroke:#b35e1f,color:#fff
+    style egress fill:#e17b31,stroke:#b35e1f,color:#fff
+    style happ fill:#fff,stroke:#999,color:#000
+    style msvc fill:#fff,stroke:#999,color:#000
+```
+
+- **Member**: Envoy's `downstream_socket_interface` bootstrap extension dials
+  the hub and keeps N connections open (the `rc://` listener address encodes
+  identity and connection count). Hub-originated requests arrive over those
+  connections and are routed to published services by canonical authority.
+- **Hub**: one public listener serves both the reverse tunnel handshake chain
+  and any forward SNI chains, split by `tls_inspector`. The handshake chain
+  requires a client certificate and validates the claimed member identity
+  against the certificate's DNS SAN. A `REVERSE_CONNECTION` cluster routes
+  egress-listener requests over the cached connections, selected by member.
+- **PKI**: per-hub CA; member leaves are SAN-bound; eviction is a CRL update
+  that Envoy hot-reloads (blast radius: one member). Certificates hot-reload
+  via SDS `watched_directory` in all modes.
+
+### Forward tunnels (v1)
 
 ```mermaid
 flowchart LR
@@ -132,7 +192,60 @@ go build -ldflags="-X main.Version=v0.1.0" -o portal ./cmd/portal
 
 ## Quick Start
 
-### Imperative (one command)
+### Hub/member (reverse tunnels)
+
+Deploy the hub on the ingress-capable cluster (creates the hub CA under
+`~/.portal/hubs/<name>/`):
+
+```bash
+portal hub init hub-ctx --name prod-hub
+```
+
+Enroll an egress-only member with the two-phase CSR flow — the member's
+private key is generated straight into an in-cluster Secret and never leaves
+the member cluster:
+
+```bash
+# Member owner (phase 1): keygen in-cluster, CSR out
+portal join member-ctx --member acme-prod --hub-addr tunnel.example:10443
+# Hub owner: sign the CSR (the granted identity is authoritative)
+portal hub sign acme-prod.csr --member acme-prod
+# Member owner (phase 2): install the certificate and connect
+portal join member-ctx --member acme-prod --cert acme-prod-cert.pem
+```
+
+(Single-operator shortcut: `portal hub invite acme-prod -o acme.credential`
+then `portal join member-ctx --credential acme.credential`.)
+
+Publish member services the hub may reach, and optionally mint a friendly
+hub-side name:
+
+```bash
+portal publish member-ctx inference --port 8080 --protocol grpc
+portal route acme-prod/inference        # hub apps call http://inference-acme-prod.portal-system/
+```
+
+For member-originated traffic (e.g. pushing telemetry to a hub-side
+collector), use the forward path over the same endpoint:
+
+```bash
+portal hub expose otel-collector --port 4317 --service-namespace monitoring --sni otel
+portal forward member-ctx otel --local-port 4317
+```
+
+Observe, rotate, and revoke:
+
+```bash
+portal status acme-prod       # identity, handshake counters, route probes
+portal renew member-ctx       # two-phase cert rotation, key stays in-cluster
+portal hub evict acme-prod    # CRL revocation; other members unaffected
+```
+
+The reverse path is HTTP/2-only (HTTP and gRPC); raw TCP belongs on the
+forward path. Most mutating commands accept `--dry-run` to print manifests
+without applying.
+
+### Forward tunnels (v1, imperative)
 
 Deploy a tunnel between two clusters. Portal discovers the LoadBalancer IP,
 generates certificates, and applies manifests to both sides:
@@ -183,6 +296,31 @@ Apply with kubectl or your GitOps controller:
 kubectl apply -k ./tunnel-manifests/destination/ --context destination-ctx
 kubectl apply -k ./tunnel-manifests/source/ --context source-ctx
 ```
+
+## Supported Envoy Versions
+
+The reverse tunnel APIs (the `rc://` listener address, handshake protocol,
+`reverse_tunnel` filter, and `REVERSE_CONNECTION` cluster) are **experimental
+upstream** and carry no stability promise. Each Portal release therefore
+renders hub/member configuration only for Envoy minors it was verified
+against, and refuses others at render time:
+
+| Portal | Envoy minors |
+|--------|--------------|
+| v2.x   | 1.37         |
+
+Pass `--allow-unsupported-envoy` to bypass the gate (e.g. to test a newer
+Envoy); `portal status` warns when a live hub reports an unsupported version.
+Forward-only (v1) tunnels use long-stable Envoy features and are not gated.
+
+## Migrating from v1
+
+Migration to hub/member is a **re-key**: v1's per-tunnel CA is replaced by a
+hub CA, so the tunnel is torn down and re-established with a brief outage.
+`portal migrate <source-ctx> <dest-ctx>` inspects the tunnel and prints the
+exact command sequence (disconnect, hub init, enrollment, and per-service
+`hub expose` + `forward` recreation) for you to review and run. v1 tunnels
+remain fully supported in the meantime.
 
 ## Bare Metal / VM Deployment
 
@@ -310,6 +448,26 @@ scp ./tunnel/responder/certs/* user@dest-host:/etc/portal/certs/
 ```
 
 ## Commands
+
+### Hub/member (reverse tunnels)
+
+| Command | Party | Description |
+|---------|-------|-------------|
+| `portal hub init` | hub owner | Deploy a hub and create its certificate authority |
+| `portal hub sign` | hub owner | Sign a member CSR into a certificate bundle |
+| `portal hub invite` | hub owner | Mint a complete member credential (single-operator shortcut) |
+| `portal hub evict` | hub owner | Revoke a member (CRL hot-reload) and remove its routing |
+| `portal hub expose` | hub owner | Expose a hub-local service to members (forward path) |
+| `portal route` | hub owner | Mint a friendly hub-side alias Service for a member service |
+| `portal join` | member owner | Join a hub (two-phase CSR or credential mode) |
+| `portal publish` / `unpublish` | member owner | Manage the allowlist of services the hub may reach |
+| `portal forward` | member owner | Local listener for a hub-exposed forward service |
+| `portal renew` | member owner | Rotate the member certificate (two-phase, key stays in-cluster) |
+| `portal leave` | member owner | Tear down member components |
+| `portal status [member]` | either | Live health: handshake counters, route probes, cert expiry |
+| `portal migrate` | single operator | Print the v1 → hub/member migration plan |
+
+### Forward tunnels (v1)
 
 | Command | Description |
 |---------|-------------|
