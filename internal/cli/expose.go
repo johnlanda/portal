@@ -58,6 +58,11 @@ created. Actual traffic routing for this direction requires reverse tunneling (P
 }
 
 func runExpose(cmd *cobra.Command, kubeContext, serviceName string, opts exposeOpts) error {
+	// v1 tunnels remain supported, but the hub/member model supersedes
+	// expose: publish (member side) and route (hub side) carry direction
+	// explicitly instead of inferring it from the tunnel record.
+	fmt.Fprintln(cmd.ErrOrStderr(), "note: for hub/member deployments use 'portal publish' and 'portal route'; expose applies to v1 tunnels only")
+
 	// 0. Validate input names.
 	if err := validate.Name(kubeContext); err != nil {
 		return fmt.Errorf("invalid kube context: %w", err)

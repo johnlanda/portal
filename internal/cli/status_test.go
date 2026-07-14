@@ -89,8 +89,8 @@ func TestStatusNoTunnels(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(buf.String(), "No tunnels found") {
-		t.Errorf("expected 'No tunnels found', got:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "No tunnels, hubs, or memberships found") {
+		t.Errorf("expected 'No tunnels, hubs, or memberships found', got:\n%s", buf.String())
 	}
 }
 
