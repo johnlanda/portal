@@ -1,6 +1,7 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -219,5 +220,124 @@ func TestSaveCreatesDirectory(t *testing.T) {
 	}
 	if len(loaded.Tunnels) != 1 {
 		t.Errorf("expected 1 tunnel, got %d", len(loaded.Tunnels))
+	}
+}
+
+func TestHubCRUD(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "tunnels.json"))
+
+	hub := HubState{
+		Name: "synapse", Context: "hub-ctx", Namespace: "portal",
+		PublicAddr: "tunnel.corp.example:10443", TunnelPort: 10443,
+		EgressPort: 10080, HandshakeSNI: "reverse-tunnel.portal",
+		CADir: "/tmp/ca", CreatedAt: time.Now(),
+	}
+	if err := s.AddHub(hub); err != nil {
+		t.Fatalf("AddHub() error = %v", err)
+	}
+	if err := s.AddHub(hub); err == nil {
+		t.Error("expected error adding duplicate hub")
+	}
+
+	got, err := s.GetHub("synapse")
+	if err != nil {
+		t.Fatalf("GetHub() error = %v", err)
+	}
+	if got.PublicAddr != "tunnel.corp.example:10443" {
+		t.Errorf("PublicAddr = %q", got.PublicAddr)
+	}
+
+	got.Members = append(got.Members, MemberRecord{Name: "acme-prod", CertSerial: "12345", JoinedAt: time.Now()})
+	if err := s.UpdateHub(*got); err != nil {
+		t.Fatalf("UpdateHub() error = %v", err)
+	}
+	got, err = s.GetHub("synapse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := got.Member("acme-prod"); m == nil || m.CertSerial != "12345" {
+		t.Errorf("Member lookup failed: %+v", got.Members)
+	}
+	if got.Member("nope") != nil {
+		t.Error("Member() should return nil for unknown member")
+	}
+
+	hubs, err := s.ListHubs()
+	if err != nil || len(hubs) != 1 {
+		t.Fatalf("ListHubs() = %v, %v", hubs, err)
+	}
+	if err := s.RemoveHub("synapse"); err != nil {
+		t.Fatalf("RemoveHub() error = %v", err)
+	}
+	if _, err := s.GetHub("synapse"); err == nil {
+		t.Error("expected error getting removed hub")
+	}
+	if err := s.RemoveHub("synapse"); err == nil {
+		t.Error("expected error removing missing hub")
+	}
+}
+
+func TestMembershipCRUD(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "tunnels.json"))
+
+	m := MembershipState{
+		Member: "acme-prod", Hub: "synapse", HubAddr: "tunnel.corp.example:10443",
+		Context: "member-ctx", Namespace: "portal", Pending: true, JoinedAt: time.Now(),
+	}
+	if err := s.AddMembership(m); err != nil {
+		t.Fatalf("AddMembership() error = %v", err)
+	}
+	if err := s.AddMembership(m); err == nil {
+		t.Error("expected error adding duplicate membership")
+	}
+
+	got, err := s.GetMembership("acme-prod")
+	if err != nil {
+		t.Fatalf("GetMembership() error = %v", err)
+	}
+	if !got.Pending {
+		t.Error("Pending flag not persisted")
+	}
+
+	got.Pending = false
+	got.Published = append(got.Published, PublishedEntry{Name: "inference", Port: 8080, Protocol: "grpc"})
+	if err := s.UpdateMembership(*got); err != nil {
+		t.Fatalf("UpdateMembership() error = %v", err)
+	}
+	got, err = s.GetMembership("acme-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := got.PublishedService("inference"); p == nil || p.Protocol != "grpc" {
+		t.Errorf("PublishedService lookup failed: %+v", got.Published)
+	}
+
+	list, err := s.ListMemberships()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListMemberships() = %v, %v", list, err)
+	}
+	if err := s.RemoveMembership("acme-prod"); err != nil {
+		t.Fatalf("RemoveMembership() error = %v", err)
+	}
+	if _, err := s.GetMembership("acme-prod"); err == nil {
+		t.Error("expected error getting removed membership")
+	}
+}
+
+// TestV1StateFileLoadsWithV2Fields ensures a legacy tunnels.json (no hubs or
+// memberships keys) loads cleanly and round-trips without corrupting v1 data.
+func TestV1StateFileLoadsWithV2Fields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tunnels.json")
+	legacy := `{"tunnels":[{"name":"t1","source_context":"a","destination_context":"b","namespace":"portal","tunnel_port":10443,"created_at":"2025-01-01T00:00:00Z","mode":"tcp","services":["svc:8080"]}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(path)
+	if err := s.AddHub(HubState{Name: "h", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("AddHub() on legacy file error = %v", err)
+	}
+	tunnels, err := s.List()
+	if err != nil || len(tunnels) != 1 || tunnels[0].Name != "t1" {
+		t.Fatalf("legacy tunnel lost after v2 write: %v, %v", tunnels, err)
 	}
 }

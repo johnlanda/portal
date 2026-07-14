@@ -101,7 +101,7 @@ static_resources:
                 strip_any_host_port: true
                 route_config:
                   name: members
-{{- if .Members}}
+{{- if or .Members .Routes}}
                   virtual_hosts:
 {{- range .Members}}
                     - name: member_{{.}}
@@ -117,6 +117,26 @@ static_resources:
                             prefix: "/"
                           route:
                             cluster: reverse_tunnel
+{{- end}}
+{{- range .Routes}}
+                    # Alias authority for {{.Service}}.{{.Member}}; the
+                    # authority is rewritten to the canonical form so member
+                    # route matching never sees hub-side alias names.
+                    - name: alias_{{.Alias}}
+                      domains:
+                        - "{{.Alias}}"
+                        - "{{.Alias}}.*"
+                      request_headers_to_add:
+                        - header:
+                            key: x-portal-member
+                            value: "{{.Member}}"
+                          append_action: OVERWRITE_IF_EXISTS_OR_ADD
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: reverse_tunnel
+                            host_rewrite_literal: "{{.Service}}.{{.Member}}"
 {{- end}}
 {{- else}}
                   virtual_hosts: []

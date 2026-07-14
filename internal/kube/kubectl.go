@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -319,4 +320,25 @@ func parseServiceJSON(data []byte) (*ServiceInfo, error) {
 		Ports:               ports,
 		LoadBalancerIngress: ingress,
 	}, nil
+}
+
+// PatchSecret merges the given keys into an existing Secret's data. Values
+// are base64-encoded per the Kubernetes Secret data contract. Keys not named
+// in data are left untouched, so a certificate can be added to a Secret
+// whose private key exists only in the cluster.
+func (c *kubectlClient) PatchSecret(ctx context.Context, name string, data map[string][]byte) error {
+	encoded := make(map[string]string, len(data))
+	for k, v := range data {
+		encoded[k] = base64.StdEncoding.EncodeToString(v)
+	}
+	patch, err := json.Marshal(map[string]interface{}{"data": encoded})
+	if err != nil {
+		return fmt.Errorf("failed to marshal secret patch: %w", err)
+	}
+	args := append(c.baseArgs(), "patch", "secret", name, "--type=merge", "-p", string(patch))
+	_, stderr, err := c.runner.Run(ctx, nil, "kubectl", args...)
+	if err != nil {
+		return &KubectlError{Command: "patch secret", Stderr: strings.TrimSpace(string(stderr)), Err: err}
+	}
+	return nil
 }

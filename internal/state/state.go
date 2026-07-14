@@ -14,6 +14,10 @@ import (
 // StateFile is the top-level structure persisted to disk.
 type StateFile struct {
 	Tunnels []TunnelState `json:"tunnels"`
+	// Hubs are v2 hub records owned by this machine's operator.
+	Hubs []HubState `json:"hubs,omitempty"`
+	// Memberships are v2 member-side records of joined hubs.
+	Memberships []MembershipState `json:"memberships,omitempty"`
 }
 
 // ServiceEntry describes a service routed through a tunnel.

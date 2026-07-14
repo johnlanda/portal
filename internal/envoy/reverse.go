@@ -101,9 +101,25 @@ type HubConfig struct {
 	EnableCRL bool
 	// Members lists member names routable via the egress listener.
 	Members []string
+	// Routes lists alias authorities minted for member services.
+	Routes []HubRouteAlias
 	// Services lists hub-local backends reachable by members over the v1
 	// forward SNI path, sharing the tunnel listener.
 	Services []ServiceRoute
+}
+
+// HubRouteAlias maps a friendly hub-side authority (an alias Service name)
+// to a member service. The egress listener rewrites the authority to the
+// canonical <Service>.<Member> form before forwarding, so member route
+// configs never depend on hub-side alias naming.
+type HubRouteAlias struct {
+	// Member is the member name.
+	Member string
+	// Service is the published service name on the member.
+	Service string
+	// Alias is the alias authority (e.g. inference-acme-prod); requests to
+	// <Alias> or <Alias>.* are routed to the member.
+	Alias string
 }
 
 //go:embed templates/member_reverse.yaml
@@ -214,6 +230,17 @@ func RenderHubBootstrap(cfg HubConfig) ([]byte, error) {
 	for _, m := range cfg.Members {
 		if err := validate.DNSName(m); err != nil {
 			return nil, fmt.Errorf("invalid member name %q: %w", m, err)
+		}
+	}
+	for _, r := range cfg.Routes {
+		if err := validate.DNSName(r.Member); err != nil {
+			return nil, fmt.Errorf("invalid route member %q: %w", r.Member, err)
+		}
+		if err := validate.DNSName(r.Service); err != nil {
+			return nil, fmt.Errorf("invalid route service %q: %w", r.Service, err)
+		}
+		if err := validate.DNSName(r.Alias); err != nil {
+			return nil, fmt.Errorf("invalid route alias %q: %w", r.Alias, err)
 		}
 	}
 	for i := range cfg.Services {
