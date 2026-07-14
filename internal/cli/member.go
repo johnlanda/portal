@@ -42,14 +42,16 @@ func memberDeployConfig(m *state.MembershipState) manifest.MemberDeployConfig {
 		})
 	}
 	return manifest.MemberDeployConfig{
-		MemberName:      m.Member,
-		HubName:         m.Hub,
-		Namespace:       m.Namespace,
-		HubAddr:         m.HubAddr,
-		HandshakeSNI:    m.HandshakeSNI,
-		ConnectionCount: m.ConnectionCount,
-		Published:       published,
-		Forward:         forward,
+		MemberName:            m.Member,
+		EnvoyImage:            m.EnvoyImage,
+		AllowUnsupportedEnvoy: m.AllowUnsupportedEnvoy,
+		HubName:               m.Hub,
+		Namespace:             m.Namespace,
+		HubAddr:               m.HubAddr,
+		HandshakeSNI:          m.HandshakeSNI,
+		ConnectionCount:       m.ConnectionCount,
+		Published:             published,
+		Forward:               forward,
 	}
 }
 
@@ -103,16 +105,18 @@ func membershipByContext(store *state.Store, kubeContext, member string) (*state
 // --- join ---
 
 type joinOpts struct {
-	member          string
-	hubAddr         string
-	hubName         string
-	credentialPath  string
-	certPath        string
-	csrOut          string
-	namespace       string
-	handshakeSNI    string
-	connectionCount int
-	deployTimeout   time.Duration
+	member                string
+	hubAddr               string
+	hubName               string
+	credentialPath        string
+	certPath              string
+	csrOut                string
+	namespace             string
+	handshakeSNI          string
+	connectionCount       int
+	deployTimeout         time.Duration
+	envoyImage            string
+	allowUnsupportedEnvoy bool
 }
 
 // NewJoinCmd creates the `portal join` command.
@@ -150,6 +154,8 @@ Credential mode (single-operator shortcut): portal join <ctx> --credential
 	cmd.Flags().StringVar(&opts.handshakeSNI, "handshake-sni", envoyDefaultHandshakeSNI, "Reverse tunnel handshake SNI (must match the hub)")
 	cmd.Flags().IntVar(&opts.connectionCount, "connection-count", manifest.DefaultConnectionCount, "Number of reverse connections to maintain")
 	cmd.Flags().DurationVar(&opts.deployTimeout, "deploy-timeout", 5*time.Minute, "Timeout waiting for deployment readiness")
+	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", "", "Envoy proxy image (default: the pinned image)")
+	cmd.Flags().BoolVar(&opts.allowUnsupportedEnvoy, "allow-unsupported-envoy", false, "Bypass the Envoy version gate (reverse tunnel APIs are experimental upstream)")
 	return cmd
 }
 
@@ -213,15 +219,17 @@ func joinPhase1(cmd *cobra.Command, store *state.Store, kubeContext string, opts
 	}
 
 	membership := state.MembershipState{
-		Member:          opts.member,
-		Hub:             opts.hubName,
-		HubAddr:         opts.hubAddr,
-		Context:         kubeContext,
-		Namespace:       opts.namespace,
-		HandshakeSNI:    opts.handshakeSNI,
-		ConnectionCount: opts.connectionCount,
-		Pending:         true,
-		JoinedAt:        time.Now(),
+		Member:                opts.member,
+		Hub:                   opts.hubName,
+		HubAddr:               opts.hubAddr,
+		Context:               kubeContext,
+		Namespace:             opts.namespace,
+		HandshakeSNI:          opts.handshakeSNI,
+		ConnectionCount:       opts.connectionCount,
+		EnvoyImage:            opts.envoyImage,
+		AllowUnsupportedEnvoy: opts.allowUnsupportedEnvoy,
+		Pending:               true,
+		JoinedAt:              time.Now(),
 	}
 	if err := store.AddMembership(membership); err != nil {
 		return fmt.Errorf("failed to save membership state: %w", err)
@@ -304,14 +312,16 @@ func joinWithCredential(cmd *cobra.Command, store *state.Store, kubeContext stri
 	}
 
 	membership := state.MembershipState{
-		Member:          cred.Member,
-		Hub:             cred.Hub,
-		HubAddr:         cred.HubAddr,
-		Context:         kubeContext,
-		Namespace:       opts.namespace,
-		HandshakeSNI:    handshakeSNI,
-		ConnectionCount: opts.connectionCount,
-		JoinedAt:        time.Now(),
+		Member:                cred.Member,
+		Hub:                   cred.Hub,
+		HubAddr:               cred.HubAddr,
+		Context:               kubeContext,
+		Namespace:             opts.namespace,
+		HandshakeSNI:          handshakeSNI,
+		ConnectionCount:       opts.connectionCount,
+		EnvoyImage:            opts.envoyImage,
+		AllowUnsupportedEnvoy: opts.allowUnsupportedEnvoy,
+		JoinedAt:              time.Now(),
 	}
 
 	cfg := memberDeployConfig(&membership)

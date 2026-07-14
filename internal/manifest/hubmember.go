@@ -48,6 +48,8 @@ type HubDeployConfig struct {
 	Services []ServiceConfig
 	// EnableCRL wires the CRL into certificate validation; CRLPEM must be set.
 	EnableCRL bool
+	// AllowUnsupportedEnvoy bypasses the Envoy version gate.
+	AllowUnsupportedEnvoy bool
 	// TLS material for the hub Secret.
 	CertPEM []byte
 	KeyPEM  []byte
@@ -61,6 +63,9 @@ func RenderHubManifests(cfg HubDeployConfig) ([]Resource, error) {
 		return nil, fmt.Errorf("invalid hub name: %w", err)
 	}
 	applyHubDefaults(&cfg)
+	if err := CheckEnvoyImage(cfg.EnvoyImage, cfg.AllowUnsupportedEnvoy); err != nil {
+		return nil, err
+	}
 	if cfg.EnableCRL && len(cfg.CRLPEM) == 0 {
 		return nil, fmt.Errorf("EnableCRL requires CRLPEM (render one with an empty revocation set)")
 	}
@@ -183,6 +188,8 @@ type MemberDeployConfig struct {
 	// EnvoyImage and EnvoyLogLevel configure the proxy container.
 	EnvoyImage    string
 	EnvoyLogLevel string
+	// AllowUnsupportedEnvoy bypasses the Envoy version gate.
+	AllowUnsupportedEnvoy bool
 	// Published lists local services the hub may reach.
 	Published []envoy.PublishedService
 	// Forward lists v1-style forward listeners.
@@ -201,6 +208,9 @@ func RenderMemberManifests(cfg MemberDeployConfig) ([]Resource, error) {
 		return nil, fmt.Errorf("invalid member name: %w", err)
 	}
 	applyMemberDefaults(&cfg)
+	if err := CheckEnvoyImage(cfg.EnvoyImage, cfg.AllowUnsupportedEnvoy); err != nil {
+		return nil, err
+	}
 	hubHost, hubPort, err := parseEndpoint(cfg.HubAddr, envoy.DefaultTunnelPort)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub address: %w", err)

@@ -118,19 +118,21 @@ func hubDeployConfig(hub *state.HubState) (manifest.HubDeployConfig, error) {
 		})
 	}
 	return manifest.HubDeployConfig{
-		HubName:      hub.Name,
-		Namespace:    hub.Namespace,
-		TunnelPort:   hub.TunnelPort,
-		EgressPort:   hub.EgressPort,
-		HandshakeSNI: hub.HandshakeSNI,
-		Members:      members,
-		Routes:       routes,
-		Services:     services,
-		EnableCRL:    true,
-		CertPEM:      certPEM,
-		KeyPEM:       keyPEM,
-		CAPEM:        caPEM,
-		CRLPEM:       crlPEM,
+		HubName:               hub.Name,
+		EnvoyImage:            hub.EnvoyImage,
+		AllowUnsupportedEnvoy: hub.AllowUnsupportedEnvoy,
+		Namespace:             hub.Namespace,
+		TunnelPort:            hub.TunnelPort,
+		EgressPort:            hub.EgressPort,
+		HandshakeSNI:          hub.HandshakeSNI,
+		Members:               members,
+		Routes:                routes,
+		Services:              services,
+		EnableCRL:             true,
+		CertPEM:               certPEM,
+		KeyPEM:                keyPEM,
+		CAPEM:                 caPEM,
+		CRLPEM:                crlPEM,
 	}, nil
 }
 
@@ -158,16 +160,18 @@ func applyHub(ctx context.Context, hub *state.HubState) error {
 // --- hub init ---
 
 type hubInitOpts struct {
-	name          string
-	publicAddr    string
-	namespace     string
-	tunnelPort    int
-	egressPort    int
-	handshakeSNI  string
-	serviceType   string
-	certValidity  time.Duration
-	deployTimeout time.Duration
-	lbTimeout     time.Duration
+	name                  string
+	publicAddr            string
+	namespace             string
+	tunnelPort            int
+	egressPort            int
+	handshakeSNI          string
+	serviceType           string
+	certValidity          time.Duration
+	deployTimeout         time.Duration
+	lbTimeout             time.Duration
+	envoyImage            string
+	allowUnsupportedEnvoy bool
 }
 
 func newHubInitCmd() *cobra.Command {
@@ -196,6 +200,8 @@ discovered and used as the endpoint members dial.`,
 	cmd.Flags().DurationVar(&opts.certValidity, "cert-validity", 8760*time.Hour, "CA and server certificate validity")
 	cmd.Flags().DurationVar(&opts.deployTimeout, "deploy-timeout", 5*time.Minute, "Timeout waiting for deployment readiness")
 	cmd.Flags().DurationVar(&opts.lbTimeout, "lb-timeout", 5*time.Minute, "Timeout waiting for LoadBalancer address")
+	cmd.Flags().StringVar(&opts.envoyImage, "envoy-image", "", "Envoy proxy image (default: the pinned image)")
+	cmd.Flags().BoolVar(&opts.allowUnsupportedEnvoy, "allow-unsupported-envoy", false, "Bypass the Envoy version gate (reverse tunnel APIs are experimental upstream)")
 	return cmd
 }
 
@@ -270,15 +276,17 @@ func runHubInit(cmd *cobra.Command, kubeContext string, opts hubInitOpts) error 
 	}
 
 	hub := &state.HubState{
-		Name:         opts.name,
-		Context:      kubeContext,
-		Namespace:    opts.namespace,
-		PublicAddr:   opts.publicAddr,
-		TunnelPort:   opts.tunnelPort,
-		EgressPort:   opts.egressPort,
-		HandshakeSNI: handshakeSNI,
-		CADir:        dir,
-		CreatedAt:    time.Now(),
+		Name:                  opts.name,
+		EnvoyImage:            opts.envoyImage,
+		AllowUnsupportedEnvoy: opts.allowUnsupportedEnvoy,
+		Context:               kubeContext,
+		Namespace:             opts.namespace,
+		PublicAddr:            opts.publicAddr,
+		TunnelPort:            opts.tunnelPort,
+		EgressPort:            opts.egressPort,
+		HandshakeSNI:          handshakeSNI,
+		CADir:                 dir,
+		CreatedAt:             time.Now(),
 	}
 
 	ctx := context.Background()

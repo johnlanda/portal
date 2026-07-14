@@ -70,6 +70,10 @@ type HubState struct {
 	HandshakeSNI string `json:"handshake_sni"`
 	// CADir is the directory holding the hub CA certificate and key.
 	CADir string `json:"ca_dir"`
+	// EnvoyImage overrides the pinned Envoy image (empty = pinned default).
+	EnvoyImage string `json:"envoy_image,omitempty"`
+	// AllowUnsupportedEnvoy records that the version gate was bypassed.
+	AllowUnsupportedEnvoy bool `json:"allow_unsupported_envoy,omitempty"`
 	// CreatedAt is when the hub was initialized.
 	CreatedAt time.Time `json:"created_at"`
 	// Members are the members this hub has signed.
@@ -106,6 +110,10 @@ type MembershipState struct {
 	HandshakeSNI string `json:"handshake_sni"`
 	// ConnectionCount is the number of reverse connections maintained.
 	ConnectionCount int `json:"connection_count"`
+	// EnvoyImage overrides the pinned Envoy image (empty = pinned default).
+	EnvoyImage string `json:"envoy_image,omitempty"`
+	// AllowUnsupportedEnvoy records that the version gate was bypassed.
+	AllowUnsupportedEnvoy bool `json:"allow_unsupported_envoy,omitempty"`
 	// Pending marks phase 1 of enrollment: key generated and CSR emitted,
 	// certificate not yet installed.
 	Pending bool `json:"pending,omitempty"`

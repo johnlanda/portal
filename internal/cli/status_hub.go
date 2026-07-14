@@ -13,6 +13,7 @@ import (
 
 	"github.com/johnlanda/portal/internal/envoy"
 	"github.com/johnlanda/portal/internal/kube"
+	"github.com/johnlanda/portal/internal/manifest"
 	"github.com/johnlanda/portal/internal/state"
 )
 
@@ -124,6 +125,9 @@ func runStatusMember(cmd *cobra.Command, member string, opts statusOpts) error {
 			p := pods[0]
 			s.HubPod = &podStatus{Ready: p.Ready, Phase: string(p.Phase), Restarts: p.Restarts, PodName: p.Name}
 			if p.Ready {
+				if warn := checkEnvoyServerVersion(ctx, client, p.Name); warn != "" {
+					s.ProbeWarning = warn
+				}
 				s.Handshakes = fetchHandshakeStatsFn(ctx, client, p.Name)
 				for _, r := range hub.Routes {
 					if r.Member != member {
@@ -342,6 +346,28 @@ func probeRoute(ctx context.Context, client kube.Client, podName string, egressP
 		probe.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
 	}
 	return probe
+}
+
+// checkEnvoyServerVersion compares the hub Envoy's live version against the
+// supported minors and returns a warning string on mismatch. Best-effort.
+func checkEnvoyServerVersion(ctx context.Context, client kube.Client, podName string) string {
+	body := fetchAdminPath(ctx, client, podName, envoy.DefaultResponderAdminPort, "/server_info")
+	if body == nil {
+		return ""
+	}
+	var info struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil || info.Version == "" {
+		return ""
+	}
+	for _, minor := range manifest.SupportedEnvoyMinors {
+		if strings.Contains(info.Version, minor+".") {
+			return ""
+		}
+	}
+	return fmt.Sprintf("hub is running Envoy %q, which this Portal release does not support (supported: %s) — reverse tunnel behavior is not guaranteed",
+		info.Version, strings.Join(manifest.SupportedEnvoyMinors, ", "))
 }
 
 // fetchAdminPath port-forwards to an Envoy admin port and GETs a path.
