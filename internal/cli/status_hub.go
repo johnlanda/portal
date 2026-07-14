@@ -49,7 +49,7 @@ type tunnelCounts struct {
 type routeProbe struct {
 	Service string `json:"service"`
 	Alias   string `json:"alias"`
-	State   string `json:"state"` // reachable | not-published | tunnel-down | unknown
+	State   string `json:"state"` // reachable | not-published | unreachable | unknown
 	Detail  string `json:"detail,omitempty"`
 }
 
@@ -333,17 +333,23 @@ func probeRoute(ctx context.Context, client kube.Client, podName string, egressP
 	defer func() { _ = resp.Body.Close() }()
 
 	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		// The member Envoy answered — the tunnel is up — but no published
-		// route matched.
-		probe.State = "not-published"
-		probe.Detail = "member Envoy returned 404: service not in publish allowlist"
-	case resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout:
-		probe.State = "tunnel-down"
-		probe.Detail = fmt.Sprintf("egress returned %d: no reverse connection for member", resp.StatusCode)
-	default:
+	case resp.StatusCode < 400:
 		probe.State = "reachable"
 		probe.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	case resp.StatusCode == http.StatusNotFound:
+		// Some Envoy builds surface an allowlist miss as a clean 404 from the
+		// member's route table.
+		probe.State = "not-published"
+		probe.Detail = "member returned 404: service not in publish allowlist"
+	default:
+		// 5xx over the reverse connection is ambiguous: the member may be
+		// disconnected (no cached socket) OR connected but without a matching
+		// published route (the member resets the unmatched stream, which the
+		// egress surfaces as 5xx rather than 404). The egress alone can't tell
+		// these apart — correlate with the handshake counters above: nonzero
+		// accepted with a live connection points to not-published.
+		probe.State = "unreachable"
+		probe.Detail = fmt.Sprintf("egress returned %d: member disconnected or service not published", resp.StatusCode)
 	}
 	return probe
 }
