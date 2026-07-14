@@ -94,6 +94,11 @@ type HubConfig struct {
 	// CleanupInterval is the unused-host cleanup interval for the reverse
 	// connection cluster (default: 60s).
 	CleanupInterval time.Duration
+	// EnableCRL adds a CRL to certificate validation for member eviction.
+	// When set, a CRL file must exist at <CertPath>/crl.pem or Envoy will
+	// refuse the configuration; render one with the certs package (an empty
+	// revocation set is fine) before enabling.
+	EnableCRL bool
 	// Members lists member names routable via the egress listener.
 	Members []string
 	// Services lists hub-local backends reachable by members over the v1

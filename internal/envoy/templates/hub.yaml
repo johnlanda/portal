@@ -172,5 +172,11 @@ static_resources:
       validation_context:
         trusted_ca:
           filename: {{.CertPath}}/ca.crt
+{{- if .EnableCRL}}
+        # Member eviction: revoked leaves are listed in the CRL, which Envoy
+        # watches and hot-reloads. Blast radius is a single member.
+        crl:
+          filename: {{.CertPath}}/crl.pem
+{{- end}}
         watched_directory:
           path: {{.CertPath}}

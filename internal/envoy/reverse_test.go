@@ -315,6 +315,25 @@ func TestRenderHubBootstrapCustomIntervals(t *testing.T) {
 	}
 }
 
+func TestRenderHubBootstrapCRL(t *testing.T) {
+	data, err := RenderHubBootstrap(HubConfig{EnableCRL: true})
+	if err != nil {
+		t.Fatalf("RenderHubBootstrap() error = %v", err)
+	}
+	mustYAML(t, data)
+	if !strings.Contains(string(data), "filename: /etc/portal/certs/crl.pem") {
+		t.Error("EnableCRL did not add CRL to validation context")
+	}
+
+	data, err = RenderHubBootstrap(HubConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "crl.pem") {
+		t.Error("CRL must not be referenced when EnableCRL is false (Envoy fails on a missing file)")
+	}
+}
+
 func TestRenderHubBootstrapHandshakeSNICollision(t *testing.T) {
 	_, err := RenderHubBootstrap(HubConfig{
 		Services: []ServiceRoute{{SNI: DefaultHandshakeSNI, BackendHost: "b", BackendPort: 1}},
