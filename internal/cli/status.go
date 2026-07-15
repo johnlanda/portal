@@ -37,7 +37,14 @@ pod health, restart counts, and service endpoints.`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
-				return fmt.Errorf("expected 0 or 2 arguments, got 1")
+				store, err := newStateStore()
+				if err != nil {
+					return fmt.Errorf("failed to initialize state store: %w", err)
+				}
+				if statusMemberArg(store, args[0]) {
+					return runStatusMember(cmd, args[0], opts)
+				}
+				return fmt.Errorf("%q is not a known member; expected 0 arguments, a member name, or <source_context> <destination_context>", args[0])
 			}
 			if len(args) == 2 {
 				return runStatusSingle(cmd, args[0], args[1], opts)
@@ -106,8 +113,18 @@ func runStatusAll(cmd *cobra.Command, opts statusOpts) error {
 
 	out := cmd.OutOrStdout()
 
+	hubs, _ := store.ListHubs()
+	memberships, _ := store.ListMemberships()
+	if len(tunnels) == 0 && len(hubs) == 0 && len(memberships) == 0 {
+		fmt.Fprintln(out, "No tunnels, hubs, or memberships found.")
+		return nil
+	}
+
+	if !opts.outputJSON {
+		printHubMemberSummary(out, store)
+	}
+
 	if len(tunnels) == 0 {
-		fmt.Fprintln(out, "No tunnels found.")
 		return nil
 	}
 

@@ -35,6 +35,11 @@ type Client interface {
 	GetService(ctx context.Context, name string) (*ServiceInfo, error)
 	// RolloutRestart triggers a rolling restart of the named deployment.
 	RolloutRestart(ctx context.Context, deployment string) error
+	// PatchSecret merges the given keys into an existing Secret's data
+	// without reading or rewriting the keys it does not name.
+	PatchSecret(ctx context.Context, name string, data map[string][]byte) error
+	// GetSecretKey returns the decoded value of a single key in a Secret.
+	GetSecretKey(ctx context.Context, name, key string) ([]byte, error)
 }
 
 // ClientOption configures a Client.

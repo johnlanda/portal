@@ -89,12 +89,14 @@ func TestStatusNoTunnels(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(buf.String(), "No tunnels found") {
-		t.Errorf("expected 'No tunnels found', got:\n%s", buf.String())
+	if !strings.Contains(buf.String(), "No tunnels, hubs, or memberships found") {
+		t.Errorf("expected 'No tunnels, hubs, or memberships found', got:\n%s", buf.String())
 	}
 }
 
 func TestStatusSingleArg(t *testing.T) {
+	setupStatusTestHooks(t)
+
 	cmd := NewStatusCmd()
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
@@ -102,9 +104,9 @@ func TestStatusSingleArg(t *testing.T) {
 
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("expected error with 1 arg")
+		t.Fatal("expected error with 1 arg that is not a member name")
 	}
-	if !strings.Contains(err.Error(), "expected 0 or 2 arguments") {
+	if !strings.Contains(err.Error(), "not a known member") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

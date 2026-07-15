@@ -22,7 +22,10 @@ import (
 	"time"
 
 	"github.com/johnlanda/portal/internal/baremetal"
+	"math/big"
+
 	"github.com/johnlanda/portal/internal/certs"
+	"github.com/johnlanda/portal/internal/envoy"
 	"github.com/johnlanda/portal/internal/manifest"
 )
 
@@ -97,4 +100,86 @@ type BareMetalBundle = baremetal.BareMetalBundle
 // files instead of Kubernetes manifests.
 func RenderBareMetalTunnel(cfg BareMetalConfig) (*BareMetalBundle, error) {
 	return baremetal.Render(cfg)
+}
+
+// --- v2 hub/member API (docs/v2-proposal.md) ---
+//
+// The hub/member model serves topologies where the member side has egress
+// only: the member dials out and maintains persistent reverse connections;
+// hub-originated requests reach published member services over them. These
+// functions are stateless building blocks for embedding Portal in a hosted
+// product: the caller persists CA material and member registries, renders
+// Envoy bootstrap content (e.g. into ConfigMaps via Helm), and manages
+// enrollment. Member private keys are generated with
+// [GenerateMemberKeyAndCSR] where the member runs and never travel; the hub
+// signs CSRs with [HubCA.SignCSR], binding identity to the certificate DNS
+// SAN. Eviction is a re-rendered CRL ([HubCA.RenderCRL]) that Envoy
+// hot-reloads.
+
+// MemberIdentity identifies a member for certificate issuance.
+// This is a re-export of [certs.MemberIdentity] for the public API.
+type MemberIdentity = certs.MemberIdentity
+
+// RevokedCert identifies a certificate to include in a CRL.
+// This is a re-export of [certs.RevokedCert] for the public API.
+type RevokedCert = certs.RevokedCert
+
+// HubCA signs member client certificates and renders CRLs for eviction.
+// This is a re-export of [certs.HubCA] for the public API.
+type HubCA = certs.HubCA
+
+// MemberConfig configures the member (egress-only cluster) Envoy bootstrap.
+// This is a re-export of [envoy.MemberConfig] for the public API.
+type MemberConfig = envoy.MemberConfig
+
+// HubConfig configures the hub (ingress-capable cluster) Envoy bootstrap.
+// This is a re-export of [envoy.HubConfig] for the public API.
+type HubConfig = envoy.HubConfig
+
+// PublishedService describes a member-local service reachable from the hub.
+// This is a re-export of [envoy.PublishedService] for the public API.
+type PublishedService = envoy.PublishedService
+
+// ServiceListener describes a v1-style forward listener on the member.
+// This is a re-export of [envoy.ServiceListener] for the public API.
+type ServiceListener = envoy.ServiceListener
+
+// ServiceRoute describes a hub-local backend reachable by members over the
+// forward SNI path. This is a re-export of [envoy.ServiceRoute] for the
+// public API.
+type ServiceRoute = envoy.ServiceRoute
+
+// NewHubCA generates a new self-signed hub certificate authority.
+func NewHubCA(hubName string, validity time.Duration) (*HubCA, error) {
+	return certs.NewHubCA(hubName, validity)
+}
+
+// LoadHubCA parses persisted hub CA material previously obtained from
+// [HubCA.CertPEM] and [HubCA.KeyPEM].
+func LoadHubCA(certPEM, keyPEM []byte) (*HubCA, error) {
+	return certs.LoadHubCA(certPEM, keyPEM)
+}
+
+// GenerateMemberKeyAndCSR generates a member keypair and CSR for two-phase
+// enrollment. Call it where the member runs so the private key never leaves
+// the member's environment.
+func GenerateMemberKeyAndCSR(id MemberIdentity) (keyPEM, csrPEM []byte, err error) {
+	return certs.GenerateMemberKeyAndCSR(id)
+}
+
+// ParseCertificateSerial extracts a certificate's serial number, for building
+// [RevokedCert] entries in eviction flows.
+func ParseCertificateSerial(certPEM []byte) (*big.Int, error) {
+	return certs.ParseCertificateSerial(certPEM)
+}
+
+// RenderMemberBootstrap renders the member Envoy bootstrap configuration
+// (e.g. for a ConfigMap in a Helm chart).
+func RenderMemberBootstrap(cfg MemberConfig) ([]byte, error) {
+	return envoy.RenderMemberBootstrap(cfg)
+}
+
+// RenderHubBootstrap renders the hub Envoy bootstrap configuration.
+func RenderHubBootstrap(cfg HubConfig) ([]byte, error) {
+	return envoy.RenderHubBootstrap(cfg)
 }

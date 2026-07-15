@@ -28,6 +28,15 @@ func main() {
 		cli.NewStatusCmd(),
 		cli.NewListCmd(),
 		cli.NewExposeCmd(),
+		cli.NewHubCmd(),
+		cli.NewJoinCmd(),
+		cli.NewPublishCmd(),
+		cli.NewUnpublishCmd(),
+		cli.NewLeaveCmd(),
+		cli.NewRouteCmd(),
+		cli.NewForwardCmd(),
+		cli.NewRenewCmd(),
+		cli.NewMigrateCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

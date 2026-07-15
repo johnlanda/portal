@@ -127,3 +127,57 @@ func TestRenderTunnelWithExternalCerts(t *testing.T) {
 		t.Error("Certs should be nil when using external certificates")
 	}
 }
+
+// TestHubMemberEnrollmentLifecycle exercises the v2 public API end to end:
+// CA creation, two-phase CSR enrollment, bootstrap rendering, and eviction.
+func TestHubMemberEnrollmentLifecycle(t *testing.T) {
+	ca, err := NewHubCA("synapse", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewHubCA() error = %v", err)
+	}
+
+	// Member side: key born where the member runs.
+	id := MemberIdentity{Member: "acme-prod", Tenant: "synapse"}
+	keyPEM, csrPEM, err := GenerateMemberKeyAndCSR(id)
+	if err != nil {
+		t.Fatalf("GenerateMemberKeyAndCSR() error = %v", err)
+	}
+	if len(keyPEM) == 0 {
+		t.Fatal("no member key generated")
+	}
+
+	// Hub side: sign, then later evict.
+	certPEM, err := ca.SignCSR(csrPEM, id, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("SignCSR() error = %v", err)
+	}
+	serial, err := ParseCertificateSerial(certPEM)
+	if err != nil {
+		t.Fatalf("ParseCertificateSerial() error = %v", err)
+	}
+	crlPEM, err := ca.RenderCRL([]RevokedCert{{Serial: serial}}, 2)
+	if err != nil {
+		t.Fatalf("RenderCRL() error = %v", err)
+	}
+	if len(crlPEM) == 0 {
+		t.Fatal("no CRL rendered")
+	}
+
+	// Bootstrap rendering for both sides.
+	member, err := RenderMemberBootstrap(MemberConfig{
+		MemberName: "acme-prod",
+		HubName:    "synapse",
+		HubHost:    "tunnel.corp.example",
+		Published:  []PublishedService{{Name: "inference", BackendHost: "inference.svc", BackendPort: 8080}},
+	})
+	if err != nil {
+		t.Fatalf("RenderMemberBootstrap() error = %v", err)
+	}
+	hub, err := RenderHubBootstrap(HubConfig{Members: []string{"acme-prod"}, EnableCRL: true})
+	if err != nil {
+		t.Fatalf("RenderHubBootstrap() error = %v", err)
+	}
+	if len(member) == 0 || len(hub) == 0 {
+		t.Fatal("empty bootstrap rendered")
+	}
+}

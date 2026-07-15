@@ -99,6 +99,11 @@ before deploying the initiator.`,
 }
 
 func runConnect(cmd *cobra.Command, sourceCtx, destCtx string, opts connectOpts) error {
+	// v1 tunnels remain fully supported. The hub/member model ('portal hub
+	// init' + 'portal join') supersedes connect for egress-only topologies:
+	// it adds hub-originated reach into the member and per-member identity.
+	fmt.Fprintln(cmd.ErrOrStderr(), "note: for egress-only topologies consider the hub/member model ('portal hub init' + 'portal join'); see 'portal migrate' for moving existing tunnels")
+
 	// 0. Validate input names.
 	if err := validate.Name(sourceCtx); err != nil {
 		return fmt.Errorf("invalid source context: %w", err)

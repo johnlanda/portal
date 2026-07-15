@@ -31,12 +31,21 @@ func runPortal(t *testing.T, args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
-// runPortalWithHome executes portal with a custom HOME directory for state isolation.
+// runPortalWithHome executes portal with a custom HOME directory for state
+// isolation. Overriding HOME also moves kubectl's default kubeconfig lookup
+// to <home>/.kube/config, so KUBECONFIG is pinned to the real kubeconfig
+// (explicitly when it is otherwise unset) to keep cluster access working.
 func runPortalWithHome(t *testing.T, home string, args ...string) (string, string, error) {
 	t.Helper()
 	t.Logf("HOME=%s portal %s", home, strings.Join(args, " "))
 	cmd := exec.Command(portalBin, args...)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	env := append(os.Environ(), "HOME="+home)
+	if os.Getenv("KUBECONFIG") == "" {
+		if realHome, err := os.UserHomeDir(); err == nil {
+			env = append(env, "KUBECONFIG="+filepath.Join(realHome, ".kube", "config"))
+		}
+	}
+	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
