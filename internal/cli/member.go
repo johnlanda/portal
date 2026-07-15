@@ -326,6 +326,20 @@ func joinWithCredential(cmd *cobra.Command, store *state.Store, kubeContext stri
 		JoinedAt:              time.Now(),
 	}
 
+	if opts.dryRun {
+		// Render without the TLS material so the member's private key is
+		// never printed to stdout (it would only be base64-wrapped in the
+		// Secret, which is not protection). The omitted Secret is noted.
+		resources, err := manifest.RenderMemberManifests(memberDeployConfig(&membership))
+		if err != nil {
+			return fmt.Errorf("failed to render member manifests: %w", err)
+		}
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "# DRY RUN — the %s Secret (member cert + private key) is omitted from this output\n", manifest.MemberSecretName)
+		printResources(out, resources)
+		return nil
+	}
+
 	cfg := memberDeployConfig(&membership)
 	cfg.CertPEM = []byte(cred.Cert)
 	cfg.KeyPEM = []byte(cred.Key)
@@ -333,10 +347,6 @@ func joinWithCredential(cmd *cobra.Command, store *state.Store, kubeContext stri
 	resources, err := manifest.RenderMemberManifests(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to render member manifests: %w", err)
-	}
-	if opts.dryRun {
-		printResources(cmd.OutOrStdout(), resources)
-		return nil
 	}
 
 	ctx := context.Background()

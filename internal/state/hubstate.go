@@ -35,6 +35,17 @@ type RouteEntry struct {
 	AliasService string `json:"alias_service"`
 }
 
+// IssuedCert records a certificate previously issued to a member. Prior certs
+// are retained until they expire so that eviction can revoke every valid cert
+// a member holds — a renewed member keeps its old (still-valid, same-SAN)
+// certificate until natural expiry, and that cert must also be revocable.
+type IssuedCert struct {
+	// Serial is the decimal serial number.
+	Serial string `json:"serial"`
+	// Expiry is the certificate NotAfter time; the record is prunable after it.
+	Expiry time.Time `json:"expiry"`
+}
+
 // MemberRecord is the hub owner's record of a signed member.
 type MemberRecord struct {
 	// Name is the member name (certificate DNS SAN, reverse tunnel cluster-id).
@@ -46,7 +57,10 @@ type MemberRecord struct {
 	CertSerial string `json:"cert_serial"`
 	// CertExpiry is the NotAfter time of the current leaf certificate.
 	CertExpiry time.Time `json:"cert_expiry,omitempty"`
-	// Evicted marks the member as revoked; its serial is included in the CRL.
+	// PriorCerts are earlier certificates that have not yet expired. On
+	// renewal the superseded cert moves here; eviction revokes all of them.
+	PriorCerts []IssuedCert `json:"prior_certs,omitempty"`
+	// Evicted marks the member as revoked; its serials are included in the CRL.
 	Evicted bool `json:"evicted,omitempty"`
 	// JoinedAt is when the member's certificate was first signed.
 	JoinedAt time.Time `json:"joined_at"`
@@ -70,6 +84,9 @@ type HubState struct {
 	HandshakeSNI string `json:"handshake_sni"`
 	// CADir is the directory holding the hub CA certificate and key.
 	CADir string `json:"ca_dir"`
+	// CRLNumber is a persisted monotonic counter for the CRL's Number field,
+	// so successive CRLs strictly increase regardless of wall-clock changes.
+	CRLNumber int64 `json:"crl_number,omitempty"`
 	// EnvoyImage overrides the pinned Envoy image (empty = pinned default).
 	EnvoyImage string `json:"envoy_image,omitempty"`
 	// AllowUnsupportedEnvoy records that the version gate was bypassed.

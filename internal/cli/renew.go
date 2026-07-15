@@ -109,6 +109,7 @@ func runRenew(cmd *cobra.Command, kubeContext, member, certPath, csrOut string) 
 		return fmt.Errorf("failed to install renewed certificate: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Certificate renewed for member %q; Envoy hot-reloads via SDS (no restart)\n", membership.Member)
-	fmt.Fprintln(out, "  The hub owner may revoke the previous certificate with 'portal hub evict' semantics if required")
+	fmt.Fprintln(out, "  The superseded certificate stays valid until its own expiry; the hub tracks it")
+	fmt.Fprintln(out, "  and 'portal hub evict' revokes every still-valid certificate this member holds.")
 	return nil
 }

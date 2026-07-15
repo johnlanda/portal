@@ -155,7 +155,7 @@ func TestHubMemberEnrollmentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCertificateSerial() error = %v", err)
 	}
-	crlPEM, err := ca.RenderCRL([]RevokedCert{{Serial: serial}})
+	crlPEM, err := ca.RenderCRL([]RevokedCert{{Serial: serial}}, 2)
 	if err != nil {
 		t.Fatalf("RenderCRL() error = %v", err)
 	}

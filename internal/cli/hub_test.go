@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/johnlanda/portal/internal/certs"
 	"github.com/johnlanda/portal/internal/kube"
 
 	"github.com/johnlanda/portal/internal/state"
@@ -591,8 +594,146 @@ func TestDryRunModes(t *testing.T) {
 		if hub.Member("acme-prod").Evicted {
 			t.Error("dry-run marked member evicted")
 		}
-		if !strings.Contains(out, "would revoke serial") {
+		if !strings.Contains(out, "would revoke") {
 			t.Error("dry-run output missing revocation note")
 		}
 	})
+}
+
+// TestEvictRevokesRenewedPriorSerial covers finding M-1: after a member
+// renews, eviction must revoke the superseded (still-valid, same-SAN)
+// certificate too, not just the newest.
+func TestEvictRevokesRenewedPriorSerial(t *testing.T) {
+	dstMock, storePath, _ := initTestHub(t)
+	tmp := t.TempDir()
+
+	// Enroll member-a via credential.
+	credPath := filepath.Join(tmp, "a.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "member-a", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath); err != nil {
+		t.Fatal(err)
+	}
+	store := state.NewStore(storePath)
+	hub, _ := store.GetHub("synapse")
+	origSerial := hub.Member("member-a").CertSerial
+	if origSerial == "" {
+		t.Fatal("no original serial recorded")
+	}
+
+	// Re-sign (as a renewal would): a fresh CSR signed for the same member.
+	_, csrPEM, err := certsGenerate(t, "member-a", "synapse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrPath := filepath.Join(tmp, "renew.csr")
+	if err := os.WriteFile(csrPath, csrPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(t, NewHubCmd(), "sign", csrPath, "--member", "member-a", "-o", filepath.Join(tmp, "renewed.pem")); err != nil {
+		t.Fatalf("re-sign failed: %v", err)
+	}
+	hub, _ = store.GetHub("synapse")
+	newSerial := hub.Member("member-a").CertSerial
+	if newSerial == origSerial {
+		t.Fatal("serial did not change on re-sign")
+	}
+	priors := hub.Member("member-a").PriorCerts
+	if len(priors) != 1 || priors[0].Serial != origSerial {
+		t.Fatalf("prior serial not retained: %+v", priors)
+	}
+
+	// Capture the CRL the eviction writes.
+	var appliedCRL []byte
+	dstMock.applyFn = func(_ context.Context, yamls [][]byte) error {
+		for _, y := range yamls {
+			if bytesContains(y, "crl.pem") {
+				appliedCRL = y
+			}
+		}
+		return nil
+	}
+	if _, err := runCommand(t, NewHubCmd(), "evict", "member-a"); err != nil {
+		t.Fatalf("evict failed: %v", err)
+	}
+
+	// Both serials must be present in the on-disk CRL.
+	crlPEM, err := os.ReadFile(filepath.Join(hub.CADir, "crl.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := crlSerials(t, crlPEM)
+	for _, want := range []string{origSerial, newSerial} {
+		if !revoked[want] {
+			t.Errorf("CRL missing serial %s; revoked set = %v", want, revoked)
+		}
+	}
+	if len(revoked) != 2 {
+		t.Errorf("expected exactly 2 revoked serials, got %d: %v", len(revoked), revoked)
+	}
+	_ = appliedCRL
+}
+
+func bytesContains(b []byte, s string) bool { return strings.Contains(string(b), s) }
+
+// certsGenerate produces a member keypair+CSR without importing the certs
+// package name collision in the test body.
+func certsGenerate(t *testing.T, member, tenant string) ([]byte, []byte, error) {
+	t.Helper()
+	return certs.GenerateMemberKeyAndCSR(certs.MemberIdentity{Member: member, Tenant: tenant})
+}
+
+// crlSerials parses a PEM CRL and returns the set of decimal serial strings.
+func crlSerials(t *testing.T, crlPEM []byte) map[string]bool {
+	t.Helper()
+	block, _ := pem.Decode(crlPEM)
+	if block == nil {
+		t.Fatal("failed to decode CRL PEM")
+	}
+	crl, err := x509.ParseRevocationList(block.Bytes)
+	if err != nil {
+		t.Fatalf("failed to parse CRL: %v", err)
+	}
+	out := map[string]bool{}
+	for _, e := range crl.RevokedCertificateEntries {
+		out[e.SerialNumber.String()] = true
+	}
+	return out
+}
+
+// TestCredentialDryRunOmitsKey covers finding L-1: --credential --dry-run must
+// not print the member private key.
+func TestCredentialDryRunOmitsKey(t *testing.T) {
+	_, _, srcMock := initTestHub(t)
+	tmp := t.TempDir()
+	credPath := filepath.Join(tmp, "a.credential")
+	if _, err := runCommand(t, NewHubCmd(), "invite", "member-a", "-o", credPath); err != nil {
+		t.Fatal(err)
+	}
+	// Pull the actual private-key material out of the credential so we can
+	// assert none of it appears in the dry-run output (the bootstrap legitimately
+	// references the path "/etc/portal/certs/tls.key", which is not key material).
+	cred, err := readCredential(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBody := strings.ReplaceAll(cred.Key, "\n", "")
+	keyBody = strings.TrimPrefix(keyBody, "-----BEGIN RSA PRIVATE KEY-----")
+	keySample := keyBody[:60] // a distinctive slice of the base64 key body
+
+	applyBefore := srcMock.applyCalls
+	out, err := runCommand(t, NewJoinCmd(), "src-member", "--credential", credPath, "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run credential join failed: %v\n%s", err, out)
+	}
+	if srcMock.applyCalls != applyBefore {
+		t.Error("dry-run applied resources")
+	}
+	if strings.Contains(out, "PRIVATE KEY") || strings.Contains(out, keySample) {
+		t.Errorf("dry-run output leaked private key material:\n%s", out)
+	}
+	if !strings.Contains(out, "omitted") {
+		t.Error("dry-run should note the Secret is omitted")
+	}
 }

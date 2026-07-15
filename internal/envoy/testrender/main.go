@@ -61,7 +61,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	crlPEM, err := ca.RenderCRL([]certs.RevokedCert{{Serial: serial}})
+	crlPEM, err := ca.RenderCRL([]certs.RevokedCert{{Serial: serial}}, 2)
 	if err != nil {
 		panic(err)
 	}

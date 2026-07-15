@@ -209,12 +209,16 @@ func (ca *HubCA) IssueHubServerCert(hubName string, sans []string, validity time
 	})
 }
 
-// RenderCRL renders a PEM-encoded CRL listing the given revoked certificates.
-// The CRL number is derived from the current time in nanoseconds, so
-// successive renderings are monotonically increasing without the CA having to
-// persist a counter. NextUpdate is set 7 days out; re-render and re-publish
-// whenever the revocation set changes and before NextUpdate passes.
-func (ca *HubCA) RenderCRL(revoked []RevokedCert) ([]byte, error) {
+// RenderCRL renders a PEM-encoded CRL listing the given revoked certificates,
+// numbered with the caller-supplied monotonic number. The caller must persist
+// and strictly increase number across renderings (a backward wall-clock step
+// must not lower it), or verifiers may reject a newer CRL as stale. NextUpdate
+// is set 7 days out; re-render and re-publish whenever the revocation set
+// changes and before NextUpdate passes.
+func (ca *HubCA) RenderCRL(revoked []RevokedCert, number int64) ([]byte, error) {
+	if number < 1 {
+		return nil, fmt.Errorf("CRL number must be >= 1, got %d", number)
+	}
 	now := time.Now()
 	entries := make([]x509.RevocationListEntry, 0, len(revoked))
 	for i, r := range revoked {
@@ -231,7 +235,7 @@ func (ca *HubCA) RenderCRL(revoked []RevokedCert) ([]byte, error) {
 		})
 	}
 	template := &x509.RevocationList{
-		Number:                    big.NewInt(now.UnixNano()),
+		Number:                    big.NewInt(number),
 		ThisUpdate:                now.UTC(),
 		NextUpdate:                now.Add(crlNextUpdateWindow).UTC(),
 		RevokedCertificateEntries: entries,

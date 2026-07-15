@@ -251,7 +251,7 @@ func runHubInit(cmd *cobra.Command, kubeContext string, opts hubInitOpts) error 
 	if err := os.WriteFile(filepath.Join(dir, "ca.key"), ca.KeyPEM(), 0o600); err != nil {
 		return fmt.Errorf("failed to write CA key: %w", err)
 	}
-	crlPEM, err := ca.RenderCRL(nil)
+	crlPEM, err := ca.RenderCRL(nil, 1)
 	if err != nil {
 		return fmt.Errorf("failed to render initial CRL: %w", err)
 	}
@@ -472,11 +472,37 @@ func recordMember(store *state.Store, hub *state.HubState, member, tenant string
 	}
 	if existing := hub.Member(member); existing != nil {
 		record.JoinedAt = existing.JoinedAt
+		// Retain the superseded certificate (and any earlier ones still
+		// valid) so a later eviction can revoke every cert this member
+		// holds, not just the newest — the old cert shares the SAN and
+		// stays valid until its own expiry.
+		record.PriorCerts = retainValidPriorCerts(existing, serial.String())
 		*existing = record
 	} else {
 		hub.Members = append(hub.Members, record)
 	}
 	return store.UpdateHub(*hub)
+}
+
+// retainValidPriorCerts carries forward the existing member's prior certs plus
+// its current cert, dropping any that have expired and the one being replaced
+// by newSerial (a re-sign of the same serial is a no-op).
+func retainValidPriorCerts(existing *state.MemberRecord, newSerial string) []state.IssuedCert {
+	now := time.Now()
+	var priors []state.IssuedCert
+	seen := map[string]bool{newSerial: true}
+	add := func(serial string, expiry time.Time) {
+		if serial == "" || seen[serial] || !expiry.After(now) {
+			return
+		}
+		seen[serial] = true
+		priors = append(priors, state.IssuedCert{Serial: serial, Expiry: expiry})
+	}
+	add(existing.CertSerial, existing.CertExpiry)
+	for _, p := range existing.PriorCerts {
+		add(p.Serial, p.Expiry)
+	}
+	return priors
 }
 
 // --- hub invite ---
@@ -611,23 +637,19 @@ func runHubEvict(cmd *cobra.Command, member, hubName string, dryRun bool) error 
 	}
 	record.Evicted = true
 
-	// Re-render the CRL with every evicted member's serial.
+	// Re-render the CRL with every still-valid serial of every evicted
+	// member — current and prior (renewal-superseded) certs alike, since a
+	// prior cert shares the SAN and stays valid until its own expiry.
 	ca, err := loadHubCA(hub)
 	if err != nil {
 		return err
 	}
-	var revoked []certs.RevokedCert
-	for _, m := range hub.Members {
-		if !m.Evicted {
-			continue
-		}
-		serial, ok := parseSerial(m.CertSerial)
-		if !ok {
-			return fmt.Errorf("member %q has an invalid stored serial %q", m.Name, m.CertSerial)
-		}
-		revoked = append(revoked, certs.RevokedCert{Serial: serial})
+	revoked, err := revokedSerials(hub)
+	if err != nil {
+		return err
 	}
-	crlPEM, err := ca.RenderCRL(revoked)
+	nextCRLNumber := hub.CRLNumber + 1
+	crlPEM, err := ca.RenderCRL(revoked, nextCRLNumber)
 	if err != nil {
 		return fmt.Errorf("failed to render CRL: %w", err)
 	}
@@ -642,10 +664,11 @@ func runHubEvict(cmd *cobra.Command, member, hubName string, dryRun bool) error 
 			return err
 		}
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "# DRY RUN — would revoke serial %s and apply:\n", record.CertSerial)
+		fmt.Fprintf(out, "# DRY RUN — would revoke %d serial(s) for member %q and apply:\n", countMemberSerials(record), member)
 		printResources(out, resources)
 		return nil
 	}
+	hub.CRLNumber = nextCRLNumber
 	if err := os.WriteFile(filepath.Join(hub.CADir, "crl.pem"), crlPEM, 0o644); err != nil {
 		return fmt.Errorf("failed to write CRL: %w", err)
 	}
@@ -658,9 +681,53 @@ func runHubEvict(cmd *cobra.Command, member, hubName string, dryRun bool) error 
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "✓ Member %q evicted: certificate revoked (serial %s), egress routing removed\n", member, record.CertSerial)
+	fmt.Fprintf(out, "✓ Member %q evicted: %d certificate(s) revoked, egress routing removed\n", member, countMemberSerials(record))
 	fmt.Fprintln(out, "  Existing connections are rejected on the next TLS handshake; other members are unaffected")
 	return nil
+}
+
+// revokedSerials collects every still-valid serial (current and prior) of
+// every evicted member, for inclusion in the CRL. Expired serials are omitted
+// to keep the CRL bounded.
+func revokedSerials(hub *state.HubState) ([]certs.RevokedCert, error) {
+	now := time.Now()
+	var revoked []certs.RevokedCert
+	for _, m := range hub.Members {
+		if !m.Evicted {
+			continue
+		}
+		serials := []state.IssuedCert{{Serial: m.CertSerial, Expiry: m.CertExpiry}}
+		serials = append(serials, m.PriorCerts...)
+		for _, s := range serials {
+			// Prior certs carry an expiry; the current cert's is m.CertExpiry.
+			// A zero expiry (older state) is treated as still-valid to be safe.
+			if !s.Expiry.IsZero() && !s.Expiry.After(now) {
+				continue
+			}
+			serial, ok := parseSerial(s.Serial)
+			if !ok {
+				return nil, fmt.Errorf("member %q has an invalid stored serial %q", m.Name, s.Serial)
+			}
+			revoked = append(revoked, certs.RevokedCert{Serial: serial})
+		}
+	}
+	return revoked, nil
+}
+
+// countMemberSerials counts the certificates (current + valid priors) that an
+// eviction of this member would revoke.
+func countMemberSerials(m *state.MemberRecord) int {
+	now := time.Now()
+	n := 0
+	if m.CertSerial != "" {
+		n++
+	}
+	for _, p := range m.PriorCerts {
+		if p.Expiry.IsZero() || p.Expiry.After(now) {
+			n++
+		}
+	}
+	return n
 }
 
 // dryRunHubInit renders the hub manifests with an ephemeral CA and prints
@@ -685,7 +752,7 @@ func dryRunHubInit(cmd *cobra.Command, opts hubInitOpts) error {
 	if err != nil {
 		return err
 	}
-	crlPEM, err := ca.RenderCRL(nil)
+	crlPEM, err := ca.RenderCRL(nil, 1)
 	if err != nil {
 		return err
 	}

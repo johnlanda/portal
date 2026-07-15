@@ -255,7 +255,7 @@ func TestRenderCRL(t *testing.T) {
 		t.Fatalf("ParseCertificateSerial() error = %v", err)
 	}
 
-	crlPEM, err := ca.RenderCRL([]RevokedCert{{Serial: serial}})
+	crlPEM, err := ca.RenderCRL([]RevokedCert{{Serial: serial}}, 2)
 	if err != nil {
 		t.Fatalf("RenderCRL() error = %v", err)
 	}
@@ -276,7 +276,7 @@ func TestRenderCRL(t *testing.T) {
 	}
 
 	// CRL numbers must increase across renderings so verifiers accept updates.
-	crlPEM2, err := ca.RenderCRL(nil)
+	crlPEM2, err := ca.RenderCRL(nil, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,8 +298,20 @@ func TestRenderCRLNilSerial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ca.RenderCRL([]RevokedCert{{}}); err == nil {
+	if _, err := ca.RenderCRL([]RevokedCert{{}}, 1); err == nil {
 		t.Error("expected error for revoked cert without serial")
+	}
+}
+
+func TestRenderCRLRejectsInvalidNumber(t *testing.T) {
+	ca, err := NewHubCA("synapse", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int64{0, -1} {
+		if _, err := ca.RenderCRL(nil, n); err == nil {
+			t.Errorf("expected error for CRL number %d", n)
+		}
 	}
 }
 

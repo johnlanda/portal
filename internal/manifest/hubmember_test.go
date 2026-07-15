@@ -20,7 +20,7 @@ func testHubTLS(t *testing.T) (certPEM, keyPEM, caPEM, crlPEM []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	crlPEM, err = ca.RenderCRL(nil)
+	crlPEM, err = ca.RenderCRL(nil, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
